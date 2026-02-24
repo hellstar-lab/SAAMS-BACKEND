@@ -35,17 +35,13 @@ export const createClass = async (req, res) => {
             return errorResponse(res, 'Semester must be a number between 1 and 8', 400, 'VALIDATION_ERROR')
         }
 
-        // 3. Verify requester is a teacher
+        // 3. Verify requester is a teacher (role is set by authMiddleware from teachers collection)
         if (req.user.role !== 'teacher') {
-            // Also check from Firestore in case role not in token claims
-            const userDoc = await db.collection('users').doc(req.user.uid).get()
-            if (!userDoc.exists || userDoc.data().role !== 'teacher') {
-                return errorResponse(res, 'Only teachers can create classes', 403, 'TEACHER_ONLY')
-            }
+            return errorResponse(res, 'Only teachers can create classes', 403, 'TEACHER_ONLY')
         }
 
         // 4. Fetch teacher profile for department
-        const teacherDoc = await db.collection('users').doc(req.user.uid).get()
+        const teacherDoc = await db.collection('teachers').doc(req.user.uid).get()
         const teacherData = teacherDoc.exists ? teacherDoc.data() : {}
 
         // 5. Create class document
@@ -261,15 +257,20 @@ export const addStudent = async (req, res) => {
         const { classData, error } = await fetchAndVerifyOwnership(classId, req.user.uid)
         if (error) return errorResponse(res, error.message, error.status, error.code)
 
-        // 2. Fetch student from users collection
-        const studentDoc = await db.collection('users').doc(studentId).get()
+        // 2. Fetch from students collection
+        const studentDoc = await db.collection('students').doc(studentId).get()
         if (!studentDoc.exists) {
+            // Check if it's a teacher UID — give correct error
+            const teacherDoc = await db.collection('teachers').doc(studentId).get()
+            if (teacherDoc.exists) {
+                return errorResponse(res, 'User is not a student', 400, 'NOT_A_STUDENT')
+            }
             return errorResponse(res, 'Student not found', 404, 'USER_NOT_FOUND')
         }
 
         const studentData = studentDoc.data()
 
-        // 3. Verify student role
+        // 3. Verify student role (defensive check)
         if (studentData.role !== 'student') {
             return errorResponse(res, 'User is not a student', 400, 'NOT_A_STUDENT')
         }
@@ -368,9 +369,8 @@ export const importStudents = async (req, res) => {
 
         // 2. For each student try to find in Firestore by studentId
         for (const student of students) {
-            const snap = await db.collection('users')
+            const snap = await db.collection('students')
                 .where('studentId', '==', student.StudentID)
-                .where('role', '==', 'student')
                 .limit(1)
                 .get()
 
@@ -434,7 +434,7 @@ export const getClassStudents = async (req, res) => {
         const registeredStudents = await Promise.all(
             studentUIDs.map(async (uid) => {
                 try {
-                    const userDoc = await db.collection('users').doc(uid).get()
+                    const userDoc = await db.collection('students').doc(uid).get()
                     if (!userDoc.exists) return null
 
                     const userData = userDoc.data()

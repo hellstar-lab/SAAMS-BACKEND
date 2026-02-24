@@ -74,7 +74,8 @@ async function cleanup(email) {
     try {
         const user = await auth.getUserByEmail(email)
         await auth.deleteUser(user.uid)
-        await db.collection('users').doc(user.uid).delete()
+        await db.collection('teachers').doc(user.uid).delete()
+        await db.collection('students').doc(user.uid).delete()
     } catch (e) { /* already deleted */ }
 }
 
@@ -137,7 +138,8 @@ async function runTests() {
     // ── TEST 5: Duplicate email ──────────────────
     console.log('\n📍 TEST 5: Duplicate Email')
     const dup = await request('POST', '/api/auth/register', {
-        name: 'Test Teacher', email: teacherEmail, password: 'test1234', role: 'teacher'
+        name: 'Test Teacher', email: teacherEmail, password: 'test1234',
+        role: 'teacher', employeeId: 'T002'
     })
     assert('success: false', dup.success === false, dup)
     assert('code: EMAIL_EXISTS', dup.code === 'EMAIL_EXISTS', dup)
@@ -197,8 +199,8 @@ async function runTests() {
     const del = await request('DELETE', '/api/auth/account', null, studentToken)
     assert('success: true', del.success === true, del)
 
-    // Verify deletion from Firestore
-    const studentDoc = await db.collection('users').doc(studentUid).get()
+    // Verify deletion from Firestore (students collection)
+    const studentDoc = await db.collection('students').doc(studentUid).get()
     assert('Firestore doc deleted', !studentDoc.exists, { exists: studentDoc.exists })
 
     // Verify deletion from Firebase Auth

@@ -183,9 +183,8 @@ export const manualApprove = async (req, res) => {
             return errorResponse(res, 'sessionId, studentId and approved are required', 400, 'VALIDATION_ERROR')
         }
 
-        // 1. Verify teacher
-        const userDoc = await db.collection('users').doc(req.user.uid).get()
-        if (!userDoc.exists || userDoc.data().role !== 'teacher') {
+        // 1. Verify teacher (role already set by authMiddleware from teachers collection)
+        if (req.user.role !== 'teacher') {
             return errorResponse(res, 'Only teachers can manually approve', 403, 'TEACHER_ONLY')
         }
 
@@ -270,7 +269,7 @@ export const getSessionAttendance = async (req, res) => {
         const profileCache = {}
         await Promise.all(records.map(async r => {
             if (!profileCache[r.studentId]) {
-                const doc = await db.collection('users').doc(r.studentId).get()
+                const doc = await db.collection('students').doc(r.studentId).get()
                 profileCache[r.studentId] = doc.exists ? { name: doc.data().name, studentId: doc.data().studentId, email: doc.data().email } : null
             }
         }))
@@ -475,7 +474,7 @@ const fetchReportData = async (classId, teacherId, fromDate, toDate) => {
     const studentUIDs = Object.keys(summaryMap)
     const profiles = {}
     await Promise.all(studentUIDs.map(async uid => {
-        const doc = await db.collection('users').doc(uid).get()
+        const doc = await db.collection('students').doc(uid).get()
         profiles[uid] = doc.exists ? doc.data() : {}
     }))
 

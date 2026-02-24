@@ -1,170 +1,128 @@
-import { db, auth, admin } from '../config/firebase.js'
+import { db, admin, auth } from '../config/firebase.js'
 import { successResponse, errorResponse } from '../utils/responseHelper.js'
 
-// ─── Validation Helpers ───────────────────────────────────────────────────────
-
-const validateEmail = (email) => {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const getUserCollection = (role) => {
+    if (role === 'teacher') return 'teachers'
+    if (role === 'student') return 'students'
+    throw new Error('Invalid role')
 }
 
-const validatePassword = (password) => {
-    return password && password.length >= 8
+const getUserFromDB = async (uid, role) => {
+    const col = getUserCollection(role)
+    const doc = await db.collection(col).doc(uid).get()
+    if (!doc.exists) return null
+    return { id: doc.id, ...doc.data() }
 }
 
 const validateRequired = (fields, body) => {
-    const missing = fields.filter(f => !body[f])
-    if (missing.length > 0) {
-        return `Missing required fields: ${missing.join(', ')}`
+    for (const f of fields) {
+        if (!body[f] || String(body[f]).trim() === '') return `${f} is required`
     }
     return null
 }
+const validateEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)
+const validatePassword = (p) => p && p.length >= 8
 
-// ─── REGISTER USER ────────────────────────────────────────────────────────────
+// ─── REGISTER ─────────────────────────────────────────────────────────────────
 // POST /api/auth/register
 export const registerUser = async (req, res) => {
     try {
-        const { name, email, password, role, employeeId, studentId, department } = req.body
+        const { name, email, password, role, employeeId, studentId, department, semester, phone } = req.body
 
-        // 1. Validate required fields
-        const missingError = validateRequired(['name', 'email', 'password', 'role'], req.body)
-        if (missingError) return errorResponse(res, missingError, 400, 'VALIDATION_ERROR')
+        // Validate commons
+        const err = validateRequired(['name', 'email', 'password', 'role'], req.body)
+        if (err) return errorResponse(res, err, 400, 'VALIDATION_ERROR')
+        if (!validateEmail(email)) return errorResponse(res, 'Invalid email address', 400, 'INVALID_EMAIL')
+        if (!validatePassword(password)) return errorResponse(res, 'Password must be at least 8 characters', 400, 'WEAK_PASSWORD')
+        if (!['teacher', 'student'].includes(role)) return errorResponse(res, 'role must be teacher or student', 400, 'INVALID_ROLE')
 
-        // 2. Validate email format
-        if (!validateEmail(email)) {
-            return errorResponse(res, 'Invalid email format', 400, 'INVALID_EMAIL')
+        // Role-specific required fields
+        if (role === 'teacher' && !employeeId) return errorResponse(res, 'employeeId is required for teachers', 400, 'VALIDATION_ERROR')
+        if (role === 'student' && !studentId) return errorResponse(res, 'studentId is required for students', 400, 'VALIDATION_ERROR')
+
+        // Create Firebase Auth user
+        let userRecord
+        try {
+            userRecord = await auth.createUser({ email: email.trim(), password, displayName: name.trim() })
+        } catch (e) {
+            if (e.code === 'auth/email-already-exists') return errorResponse(res, 'Email already registered', 409, 'EMAIL_EXISTS')
+            if (e.code === 'auth/invalid-email') return errorResponse(res, 'Invalid email address', 400, 'INVALID_EMAIL')
+            if (e.code === 'auth/weak-password') return errorResponse(res, 'Password is too weak', 400, 'WEAK_PASSWORD')
+            throw e
         }
 
-        // 3. Validate password length
-        if (!validatePassword(password)) {
-            return errorResponse(res, 'Password must be at least 8 characters', 400, 'WEAK_PASSWORD')
+        const uid = userRecord.uid
+        const now = admin.firestore.FieldValue.serverTimestamp()
+
+        let userData
+        if (role === 'teacher') {
+            userData = {
+                uid, name: name.trim(), email: email.trim(),
+                employeeId: employeeId || '', department: department || '',
+                phone: phone || '', role: 'teacher', faceData: null,
+                createdAt: now, updatedAt: now, lastLoginAt: null
+            }
+            await db.collection('teachers').doc(uid).set(userData)
+        } else {
+            userData = {
+                uid, name: name.trim(), email: email.trim(),
+                studentId: studentId || '', department: department || '',
+                semester: Number(semester) || 1, phone: phone || '',
+                role: 'student', faceData: null, enrolledClasses: [],
+                createdAt: now, updatedAt: now, lastLoginAt: null
+            }
+            await db.collection('students').doc(uid).set(userData)
         }
 
-        // 4. Validate role
-        if (!['teacher', 'student'].includes(role)) {
-            return errorResponse(res, "Role must be 'teacher' or 'student'", 400, 'INVALID_ROLE')
-        }
-
-        // 5. Create Firebase Auth user
-        const userRecord = await auth.createUser({
-            email,
-            password,
-            displayName: name
-        })
-
-        // 6. Save to Firestore
-        const userData = {
-            uid: userRecord.uid,
-            name,
-            email,
-            role,
-            employeeId: employeeId || null,
-            studentId: studentId || null,
-            department: department || null,
-            faceData: null,
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-        }
-
-        await db.collection('users').doc(userRecord.uid).set(userData)
-
-        // 7. Return success with uid
-        return successResponse(res, {
-            message: 'User registered successfully',
-            uid: userRecord.uid,
-            user: { ...userData, createdAt: new Date().toISOString() }
-        }, 201)
+        const { faceData, ...safeData } = userData
+        return successResponse(res, { message: 'User registered successfully', uid, user: safeData }, 201)
 
     } catch (error) {
         console.error('registerUser error:', error)
-
-        if (error.code === 'auth/email-already-exists') {
-            return errorResponse(res, 'Email already registered', 409, 'EMAIL_EXISTS')
-        }
-        if (error.code === 'auth/invalid-email') {
-            return errorResponse(res, 'Invalid email format', 400, 'INVALID_EMAIL')
-        }
-        if (error.code === 'auth/weak-password') {
-            return errorResponse(res, 'Password too weak', 400, 'WEAK_PASSWORD')
-        }
-
         return errorResponse(res, 'Registration failed', 500, 'SERVER_ERROR')
     }
 }
 
-// ─── LOGIN (TOKEN VERIFICATION) ───────────────────────────────────────────────
+// ─── LOGIN ────────────────────────────────────────────────────────────────────
 // POST /api/auth/login
-// Client-side Firebase login sends the idToken to this endpoint for verification
 export const loginUser = async (req, res) => {
     try {
         const { idToken } = req.body
+        if (!idToken) return errorResponse(res, 'idToken is required', 400, 'VALIDATION_ERROR')
 
-        if (!idToken) {
-            return errorResponse(res, 'idToken is required', 400, 'VALIDATION_ERROR')
+        const decoded = await auth.verifyIdToken(idToken)
+        const uid = decoded.uid
+
+        // Check teachers first, then students
+        let user = await getUserFromDB(uid, 'teacher')
+        let role = 'teacher'
+        if (!user) {
+            user = await getUserFromDB(uid, 'student')
+            role = 'student'
         }
+        if (!user) return errorResponse(res, 'User not found in database', 404, 'USER_NOT_FOUND')
 
-        // 1. Verify idToken with Firebase Admin
-        const decodedToken = await auth.verifyIdToken(idToken)
-        const uid = decodedToken.uid
+        await db.collection(getUserCollection(role)).doc(uid).update({ lastLoginAt: admin.firestore.FieldValue.serverTimestamp() })
 
-        // 2. Fetch user from Firestore
-        const userDoc = await db.collection('users').doc(uid).get()
-
-        if (!userDoc.exists) {
-            return errorResponse(res, 'User profile not found', 404, 'USER_NOT_FOUND')
-        }
-
-        const userData = userDoc.data()
-
-        // 3. Update lastLoginAt in Firestore
-        await db.collection('users').doc(uid).update({
-            lastLoginAt: admin.firestore.FieldValue.serverTimestamp()
-        })
-
-        // 4. Return user profile data
-        return successResponse(res, {
-            message: 'Login verified successfully',
-            user: {
-                uid: userData.uid,
-                name: userData.name,
-                email: userData.email,
-                role: userData.role,
-                employeeId: userData.employeeId,
-                studentId: userData.studentId,
-                department: userData.department
-            }
-        })
+        const { faceData, ...safeData } = user
+        return successResponse(res, { message: 'Login successful', user: { ...safeData, role } })
 
     } catch (error) {
         console.error('loginUser error:', error)
-
-        if (error.code === 'auth/id-token-expired') {
-            return errorResponse(res, 'Token has expired. Please log in again.', 401, 'TOKEN_EXPIRED')
-        }
-        if (error.code === 'auth/argument-error' || error.code === 'auth/invalid-id-token') {
-            return errorResponse(res, 'Invalid token', 401, 'AUTH_INVALID')
-        }
-
-        return errorResponse(res, 'Login verification failed', 500, 'SERVER_ERROR')
+        return errorResponse(res, 'Login failed', 500, 'SERVER_ERROR')
     }
 }
 
 // ─── GET PROFILE ──────────────────────────────────────────────────────────────
 // GET /api/auth/profile
-// Requires: Authorization: Bearer {idToken}
 export const getProfile = async (req, res) => {
     try {
-        const uid = req.user.uid
+        const { uid, role } = req.user
+        const user = await getUserFromDB(uid, role)
+        if (!user) return errorResponse(res, 'Profile not found', 404, 'USER_NOT_FOUND')
 
-        const userDoc = await db.collection('users').doc(uid).get()
-
-        if (!userDoc.exists) {
-            return errorResponse(res, 'User profile not found', 404, 'USER_NOT_FOUND')
-        }
-
-        const userData = userDoc.data()
-
-        // Return user data, excluding sensitive fields like faceData
-        const { faceData, ...safeData } = userData
-
+        const { faceData, ...safeData } = user
         return successResponse(res, { user: safeData })
 
     } catch (error) {
@@ -175,46 +133,28 @@ export const getProfile = async (req, res) => {
 
 // ─── UPDATE PROFILE ───────────────────────────────────────────────────────────
 // PUT /api/auth/profile
-// Requires: Authorization: Bearer {idToken}
-// Body: { name, department, phone, employeeId }
 export const updateProfile = async (req, res) => {
     try {
-        const uid = req.user.uid
-        const { name, department, phone, employeeId } = req.body
+        const { uid, role } = req.user
+        const { name, phone, department, employeeId, studentId, semester } = req.body
 
-        // 1. Validate name if provided
-        if (name !== undefined && name.length < 2) {
-            return errorResponse(res, 'Name must be at least 2 characters', 400, 'VALIDATION_ERROR')
-        }
-
-        // 2. Build update object with only provided fields
-        const updateData = {}
-        if (name !== undefined) updateData.name = name
-        if (department !== undefined) updateData.department = department
+        const updateData = { updatedAt: admin.firestore.FieldValue.serverTimestamp() }
+        if (name !== undefined) updateData.name = name.trim()
         if (phone !== undefined) updateData.phone = phone
-        if (employeeId !== undefined) updateData.employeeId = employeeId
-        updateData.updatedAt = admin.firestore.FieldValue.serverTimestamp()
+        if (department !== undefined) updateData.department = department
+        if (role === 'teacher' && employeeId !== undefined) updateData.employeeId = employeeId
+        if (role === 'student' && studentId !== undefined) updateData.studentId = studentId
+        if (role === 'student' && semester !== undefined) updateData.semester = Number(semester)
 
-        if (Object.keys(updateData).length === 1) {
-            return errorResponse(res, 'No fields provided to update', 400, 'VALIDATION_ERROR')
-        }
+        if (Object.keys(updateData).length === 1) return errorResponse(res, 'No fields provided to update', 400, 'VALIDATION_ERROR')
 
-        // 3. Update in Firestore
-        await db.collection('users').doc(uid).update(updateData)
+        const col = getUserCollection(role)
+        await db.collection(col).doc(uid).update(updateData)
+        if (name) await auth.updateUser(uid, { displayName: name.trim() })
 
-        // 4. If name changed, also update Firebase Auth displayName
-        if (name) {
-            await auth.updateUser(uid, { displayName: name })
-        }
-
-        // 5. Fetch and return the updated profile
-        const updatedDoc = await db.collection('users').doc(uid).get()
-        const { faceData, ...safeData } = updatedDoc.data()
-
-        return successResponse(res, {
-            message: 'Profile updated successfully',
-            user: safeData
-        })
+        const updated = await getUserFromDB(uid, role)
+        const { faceData, ...safeData } = updated
+        return successResponse(res, { message: 'Profile updated', user: safeData })
 
     } catch (error) {
         console.error('updateProfile error:', error)
@@ -224,49 +164,26 @@ export const updateProfile = async (req, res) => {
 
 // ─── CHANGE PASSWORD ──────────────────────────────────────────────────────────
 // POST /api/auth/change-password
-// Requires: Authorization: Bearer {idToken}
-// Body: { newPassword }
 export const changePassword = async (req, res) => {
     try {
-        const uid = req.user.uid
         const { newPassword } = req.body
-
-        // 1. Validate new password
-        if (!validatePassword(newPassword)) {
-            return errorResponse(res, 'New password must be at least 8 characters', 400, 'WEAK_PASSWORD')
-        }
-
-        // 2. Update password in Firebase Auth
-        await auth.updateUser(uid, { password: newPassword })
-
+        if (!validatePassword(newPassword)) return errorResponse(res, 'New password must be at least 8 characters', 400, 'WEAK_PASSWORD')
+        await auth.updateUser(req.user.uid, { password: newPassword })
         return successResponse(res, { message: 'Password changed successfully' })
-
     } catch (error) {
         console.error('changePassword error:', error)
-
-        if (error.code === 'auth/weak-password') {
-            return errorResponse(res, 'Password too weak', 400, 'WEAK_PASSWORD')
-        }
-
         return errorResponse(res, 'Failed to change password', 500, 'SERVER_ERROR')
     }
 }
 
 // ─── DELETE ACCOUNT ───────────────────────────────────────────────────────────
 // DELETE /api/auth/account
-// Requires: Authorization: Bearer {idToken}
 export const deleteAccount = async (req, res) => {
     try {
-        const uid = req.user.uid
-
-        // 1. Delete from Firestore users collection
-        await db.collection('users').doc(uid).delete()
-
-        // 2. Delete from Firebase Auth
+        const { uid, role } = req.user
+        await db.collection(getUserCollection(role)).doc(uid).delete()
         await auth.deleteUser(uid)
-
         return successResponse(res, { message: 'Account deleted successfully' })
-
     } catch (error) {
         console.error('deleteAccount error:', error)
         return errorResponse(res, 'Failed to delete account', 500, 'SERVER_ERROR')

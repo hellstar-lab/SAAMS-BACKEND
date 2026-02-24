@@ -1,26 +1,31 @@
-import { auth } from '../config/firebase.js'
+import { auth, db } from '../config/firebase.js'
+import { errorResponse } from '../utils/responseHelper.js'
 
 export const verifyToken = async (req, res, next) => {
     try {
-        const authHeader = req.headers.authorization
+        const token = req.headers.authorization?.split('Bearer ')[1]
+        if (!token) return res.status(401).json({ success: false, code: 'AUTH_REQUIRED' })
 
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({
-                success: false,
-                error: 'No token provided',
-                code: 'AUTH_REQUIRED'
-            })
+        const decoded = await auth.verifyIdToken(token)
+
+        // Try teachers collection first
+        let userDoc = await db.collection('teachers').doc(decoded.uid).get()
+        if (userDoc.exists) {
+            req.user = { ...decoded, ...userDoc.data(), role: 'teacher', collection: 'teachers' }
+            return next()
         }
 
-        const token = authHeader.split('Bearer ')[1]
-        const decodedToken = await auth.verifyIdToken(token)
-        req.user = decodedToken
-        next()
+        // Try students collection
+        userDoc = await db.collection('students').doc(decoded.uid).get()
+        if (userDoc.exists) {
+            req.user = { ...decoded, ...userDoc.data(), role: 'student', collection: 'students' }
+            return next()
+        }
+
+        return res.status(401).json({ success: false, error: 'User not found in database', code: 'USER_NOT_FOUND' })
+
     } catch (error) {
-        return res.status(401).json({
-            success: false,
-            error: 'Invalid or expired token',
-            code: 'AUTH_INVALID'
-        })
+        console.error('verifyToken error:', error)
+        return res.status(401).json({ success: false, error: 'Invalid token', code: 'INVALID_TOKEN' })
     }
 }
