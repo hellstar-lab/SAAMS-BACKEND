@@ -231,7 +231,19 @@ export const deleteClass = async (req, res) => {
             return errorResponse(res, 'Cannot delete class with an active session in progress', 400, 'ACTIVE_SESSION')
         }
 
-        // 3. Delete class document
+        // 3. Remove this class from all registered students' enrolledClasses
+        if (classData.students && classData.students.length > 0) {
+            const batch = db.batch()
+            for (const studentId of classData.students) {
+                const studentRef = db.collection('students').doc(studentId)
+                batch.update(studentRef, {
+                    enrolledClasses: admin.firestore.FieldValue.arrayRemove(classId)
+                })
+            }
+            await batch.commit()
+        }
+
+        // 4. Delete class document
         await db.collection('classes').doc(classId).delete()
 
         return successResponse(res, { message: 'Class deleted successfully' })
@@ -297,6 +309,11 @@ export const addStudent = async (req, res) => {
 
         await db.collection('classes').doc(classId).update(updates)
 
+        // 6. Update student's enrolledClasses array
+        await db.collection('students').doc(studentId).update({
+            enrolledClasses: admin.firestore.FieldValue.arrayUnion(classId)
+        })
+
         return successResponse(res, {
             message: 'Student added successfully',
             student: {
@@ -338,6 +355,10 @@ export const removeStudent = async (req, res) => {
             if (!studentId) return errorResponse(res, 'studentId is required', 400, 'VALIDATION_ERROR')
             await db.collection('classes').doc(classId).update({
                 students: admin.firestore.FieldValue.arrayRemove(studentId)
+            })
+            // 4. Update student's enrolledClasses array
+            await db.collection('students').doc(studentId).update({
+                enrolledClasses: admin.firestore.FieldValue.arrayRemove(classId)
             })
         }
 
@@ -402,6 +423,18 @@ export const importStudents = async (req, res) => {
 
         if (Object.keys(updateData).length > 0) {
             await db.collection('classes').doc(classId).update(updateData)
+
+            // 4. Update enrolledClasses for all matched students
+            if (matchedUIDs.length > 0) {
+                const batch = db.batch()
+                for (const uid of matchedUIDs) {
+                    const studentRef = db.collection('students').doc(uid)
+                    batch.update(studentRef, {
+                        enrolledClasses: admin.firestore.FieldValue.arrayUnion(classId)
+                    })
+                }
+                await batch.commit()
+            }
         }
 
         return successResponse(res, {

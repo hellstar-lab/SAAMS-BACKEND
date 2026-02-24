@@ -169,6 +169,10 @@ async function runTests() {
     const addTeacherAsStudent = await req('POST', `/api/classes/${classId}/students/add`, { studentId: teacherUid }, teacherToken)
     assert('Add teacher as student → NOT_A_STUDENT', addTeacherAsStudent.code === 'NOT_A_STUDENT', addTeacherAsStudent)
 
+    // Verify enrolledClasses updated on student
+    const studentProf = await req('GET', '/api/auth/profile', null, studentToken)
+    assert('Student enrolledClasses updated', studentProf.user?.enrolledClasses?.includes(classId), studentProf.user)
+
     // ── TEST 7: Student can now access the class ──
     console.log('\n📍 TEST 7: Student access after being added')
     const studentView = await req('GET', `/api/classes/${classId}`, null, studentToken)
@@ -205,6 +209,10 @@ async function runTests() {
         studentId: studentUid, isPending: false
     }, teacherToken)
     assert('success: true', removeStud.success === true, removeStud)
+
+    // Verify enrolledClasses removed on student
+    const studentProf2 = await req('GET', '/api/auth/profile', null, studentToken)
+    assert('Student enrolledClasses removed', !studentProf2.user?.enrolledClasses?.includes(classId), studentProf2.user)
 
     // ── TEST 11: Delete Class ─────────────────────
     console.log('\n📍 TEST 11: DELETE /api/classes/:classId')
