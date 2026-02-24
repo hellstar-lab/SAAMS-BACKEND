@@ -98,9 +98,21 @@ export const loginUser = async (req, res) => {
         let user = await getUserFromDB(uid, 'teacher')
         let role = 'teacher'
         if (!user) {
-            user = await getUserFromDB(uid, 'student')
-            role = 'student'
+            // Check legacy 'users' collection (auto-migration for Frontend direct writes)
+            const legacyDoc = await db.collection('users').doc(uid).get()
+            if (legacyDoc.exists) {
+                const userData = legacyDoc.data()
+                role = userData.role === 'teacher' ? 'teacher' : 'student'
+                const targetCollection = role === 'teacher' ? 'teachers' : 'students'
+
+                // Migrate the data
+                await db.collection(targetCollection).doc(uid).set(userData)
+                await db.collection('users').doc(uid).delete()
+                user = { id: uid, ...userData }
+                console.log(`Auto-migrated user ${uid} from 'users' to '${targetCollection}' during login.`)
+            }
         }
+
         if (!user) return errorResponse(res, 'User not found in database', 404, 'USER_NOT_FOUND')
 
         await db.collection(getUserCollection(role)).doc(uid).update({ lastLoginAt: admin.firestore.FieldValue.serverTimestamp() })

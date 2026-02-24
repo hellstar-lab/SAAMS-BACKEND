@@ -29,6 +29,22 @@ export const verifyToken = async (req, res, next) => {
                 return next();
             }
 
+            // Fallback: Check legacy 'users' collection (auto-migration for Frontend direct writes)
+            userDoc = await db.collection('users').doc(decoded.uid).get();
+            if (userDoc.exists) {
+                const userData = userDoc.data();
+                const assignedRole = userData.role === 'teacher' ? 'teacher' : 'student';
+                const targetCollection = assignedRole === 'teacher' ? 'teachers' : 'students';
+
+                // Transparently migrate the user struct to the new architecture
+                await db.collection(targetCollection).doc(decoded.uid).set(userData);
+                await db.collection('users').doc(decoded.uid).delete();
+
+                req.user = { ...decoded, ...userData, role: assignedRole, collection: targetCollection };
+                console.log(`Auto-migrated user ${decoded.uid} from 'users' to '${targetCollection}' during fetch.`);
+                return next();
+            }
+
             // If not found and haven't exhausted retries, wait and try again
             if (attempt < maxRetries) {
                 console.log(`User doc ${decoded.uid} not found. Retrying (${attempt}/${maxRetries})...`);
