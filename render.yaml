@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: saam-backend
+    env: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false

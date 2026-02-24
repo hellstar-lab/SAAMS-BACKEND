@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Environment variables — NEVER commit these
+.env
+.env.local
+.env.production
+
+# Firebase service account keys — SENSITIVE, never commit
+*.json
+!package.json
+!package-lock.json
+
+# Test files (optional — comment out to include in repo)
+# test-auth.js
+# test-classes.js
+# test-sessions.js
+# test-attendance.js
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
