@@ -1,4 +1,5 @@
-import { createCanvas, loadImage } from 'canvas'
+import * as canvas from 'canvas'
+const { createCanvas, loadImage } = canvas
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { createRequire } from 'module'
@@ -19,6 +20,13 @@ export async function initFaceApi() {
     if (isLoaded) return
 
     try {
+        console.log('Monkey-patching face-api for Node environment...')
+        faceapi.env.monkeyPatch({
+            Canvas: canvas.Canvas,
+            Image: canvas.Image,
+            ImageData: canvas.ImageData
+        })
+
         // 1. Set and await the TF backend BEFORE loading any model weights
         await tf.setBackend('cpu')
         await tf.ready()
