@@ -17,8 +17,10 @@ import { errorMiddleware } from './middleware/errorMiddleware.js'
 const app = express()
 const PORT = process.env.PORT || 3000
 
-// Security
-app.use(helmet())
+// Security - relax crossOriginResourcePolicy to allow mobile apps to upload images
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}))
 
 // Rate limiting
 const limiter = rateLimit({
@@ -31,10 +33,10 @@ const limiter = rateLimit({
 })
 app.use(limiter)
 
-// Middleware
+// Middleware - boost to 50mb for raw high-res camera base64 strings
 app.use(cors({ origin: '*' }))
-app.use(bodyParser.json({ limit: '10mb' }))
-app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }))
+app.use(bodyParser.json({ limit: '50mb' }))
+app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }))
 
 // Health check
 app.get('/health', (req, res) => {
