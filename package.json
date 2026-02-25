@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "postinstall": "node polyfill-tfjs.js"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",
