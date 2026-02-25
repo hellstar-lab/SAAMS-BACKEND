@@ -4,8 +4,8 @@ import { enrollFace, verifyFace } from '../controllers/faceController.js'
 
 const router = express.Router()
 
-// Both routes require a valid Firebase token
-router.use(verifyToken)
+// Routes are currently public as requested
+// router.use(verifyToken)
 
 // POST /api/face/enroll  — store a student's face descriptor
 router.post('/enroll', enrollFace)
