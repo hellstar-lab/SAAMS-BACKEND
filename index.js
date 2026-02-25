@@ -66,14 +66,14 @@ app.use((req, res) => {
 // Error handler
 app.use(errorMiddleware)
 
-// Pre-load face-api models before accepting requests
-initFaceApi().then(() => {
-  app.listen(PORT, () => {
-    console.log(`SAAM Backend running on port ${PORT}`)
-  })
-}).catch(err => {
-  console.error('Failed to load face-api models:', err)
-  process.exit(1)
+// Pre-load face-api models — non-fatal if something is wrong, endpoints will return error
+initFaceApi().catch(err => {
+  console.warn('⚠️  face-api models could not be pre-loaded:', err.message)
+  console.warn('    Face endpoints will attempt to load models on first request.')
+})
+
+app.listen(PORT, () => {
+  console.log(`SAAM Backend running on port ${PORT}`)
 })
 
 export default app

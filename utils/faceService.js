@@ -7,25 +7,33 @@ import * as tf from '@tensorflow/tfjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
 
-// Import the ESM-nobundle dist so it uses whichever tf backend is already registered
+// Import the CJS dist that uses the registered tf backend
 const faceapi = require('@vladmandic/face-api/dist/face-api.node-wasm.js')
 
-const MODELS_PATH = resolve(__dirname, '../models')
+// Load models directly from the npm package — always available after `npm install`
+// No separate copy/download step needed on any platform.
+const MODELS_PATH = resolve(__dirname, '../node_modules/@vladmandic/face-api/model')
 let isLoaded = false
 
 export async function initFaceApi() {
     if (isLoaded) return
 
-    // 1. Set and await the TF backend BEFORE loading any model weights
-    await tf.setBackend('cpu')
-    await tf.ready()
+    try {
+        // 1. Set and await the TF backend BEFORE loading any model weights
+        await tf.setBackend('cpu')
+        await tf.ready()
 
-    console.log('Loading face-api models...')
-    await faceapi.nets.ssdMobilenetv1.loadFromDisk(MODELS_PATH)
-    await faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_PATH)
-    await faceapi.nets.faceRecognitionNet.loadFromDisk(MODELS_PATH)
-    isLoaded = true
-    console.log('✅ face-api models loaded successfully')
+        console.log(`Loading face-api models from: ${MODELS_PATH}`)
+        await faceapi.nets.ssdMobilenetv1.loadFromDisk(MODELS_PATH)
+        await faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_PATH)
+        await faceapi.nets.faceRecognitionNet.loadFromDisk(MODELS_PATH)
+        isLoaded = true
+        console.log('\u2705 face-api models loaded successfully')
+    } catch (error) {
+        console.error('Error loading face-api models:', error)
+        // Optionally rethrow or handle the error as needed, but for non-fatal, we just log.
+        // The `isLoaded` flag will remain false, indicating models are not ready.
+    }
 }
 
 // ── 3. Extract 128-float face descriptor from base64 image ────────────────────
