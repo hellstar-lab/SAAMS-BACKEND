@@ -10,6 +10,8 @@ import authRoutes from './routes/authRoutes.js'
 import classRoutes from './routes/classRoutes.js'
 import sessionRoutes from './routes/sessionRoutes.js'
 import attendanceRoutes from './routes/attendanceRoutes.js'
+import faceRoutes from './routes/faceRoutes.js'
+import { initFaceApi } from './utils/faceService.js'
 import { errorMiddleware } from './middleware/errorMiddleware.js'
 
 const app = express()
@@ -50,6 +52,7 @@ app.use('/api/auth', authRoutes)
 app.use('/api/classes', classRoutes)
 app.use('/api/sessions', sessionRoutes)
 app.use('/api/attendance', attendanceRoutes)
+app.use('/api/face', faceRoutes)
 
 // 404 handler
 app.use((req, res) => {
@@ -63,8 +66,14 @@ app.use((req, res) => {
 // Error handler
 app.use(errorMiddleware)
 
-app.listen(PORT, () => {
-  console.log(`SAAM Backend running on port ${PORT}`)
+// Pre-load face-api models before accepting requests
+initFaceApi().then(() => {
+  app.listen(PORT, () => {
+    console.log(`SAAM Backend running on port ${PORT}`)
+  })
+}).catch(err => {
+  console.error('Failed to load face-api models:', err)
+  process.exit(1)
 })
 
 export default app
