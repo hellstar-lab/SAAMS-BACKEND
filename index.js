@@ -11,6 +11,11 @@ import classRoutes from './routes/classRoutes.js'
 import sessionRoutes from './routes/sessionRoutes.js'
 import attendanceRoutes from './routes/attendanceRoutes.js'
 import faceRoutes from './routes/faceRoutes.js'
+import departmentRoutes from './routes/departmentRoutes.js'
+import hodRoutes from './routes/hodRoutes.js'
+import disputeRoutes from './routes/disputeRoutes.js'
+import notificationRoutes from './routes/notificationRoutes.js'
+import superAdminRoutes from './routes/superAdminRoutes.js'
 import { initFaceApi } from './utils/faceService.js'
 import { errorMiddleware } from './middleware/errorMiddleware.js'
 
@@ -55,6 +60,11 @@ app.use('/api/classes', classRoutes)
 app.use('/api/sessions', sessionRoutes)
 app.use('/api/attendance', attendanceRoutes)
 app.use('/api/face', faceRoutes)
+app.use('/api/departments', departmentRoutes)
+app.use('/api/hod', hodRoutes)
+app.use('/api/disputes', disputeRoutes)
+app.use('/api/notifications', notificationRoutes)
+app.use('/api/admin', superAdminRoutes)
 
 // 404 handler
 app.use((req, res) => {

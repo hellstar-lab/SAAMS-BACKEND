@@ -1,0 +1,255 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==========================================
+    // HELPER FUNCTIONS
+    // ==========================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(uid) {
+      return request.auth.uid == uid;
+    }
+    
+    function isSuperAdmin() {
+      return exists(/databases/$(database)/documents/superAdmin/$(request.auth.uid));
+    }
+    
+    function getTeacherData() {
+      return get(/databases/$(database)/documents/teachers/$(request.auth.uid)).data;
+    }
+    
+    function getStudentData() {
+      return get(/databases/$(database)/documents/students/$(request.auth.uid)).data;
+    }
+    
+    function isTeacher() {
+      return exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) && 
+             (getTeacherData().role == 'teacher' || getTeacherData().role == 'hod');
+    }
+    
+    function isHod() {
+      return exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) && 
+             getTeacherData().isHod == true;
+    }
+    
+    function isStudent() {
+      return exists(/databases/$(database)/documents/students/$(request.auth.uid)) && 
+             getStudentData().role == 'student';
+    }
+    
+    function isActive() {
+      return (exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) && getTeacherData().isActive == true) || 
+             (exists(/databases/$(database)/documents/students/$(request.auth.uid)) && getStudentData().isActive == true) || 
+             isSuperAdmin();
+    }
+    
+    function sameDepartment(departmentId) {
+      return (exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) && getTeacherData().departmentId == departmentId) || 
+             (exists(/databases/$(database)/documents/students/$(request.auth.uid)) && getStudentData().departmentId == departmentId);
+    }
+
+    // ==========================================
+    // COLLECTION RULES
+    // ==========================================
+
+    // 1. superAdmin collection:
+    // Protects god-mode users. Only owner can read, no client writes.
+    match /superAdmin/{uid} {
+      allow read: if isAuthenticated() && isOwner(uid);
+      allow write: if false;
+    }
+
+    // 2. departments collection:
+    // Public structure data. Any authenticated user can read, no client writes.
+    match /departments/{deptId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
+    // 3. teachers collection:
+    // Protects teacher profiles and hierarchy. Restricts role/isHod changes.
+    match /teachers/{uid} {
+      allow read: if isAuthenticated() && (
+        isOwner(uid) || 
+        isSuperAdmin() ||
+        (isTeacher() && sameDepartment(resource.data.departmentId))
+      );
+      
+      allow create, delete: if false;
+      allow update: if isAuthenticated() && isOwner(uid) &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.isHod == resource.data.isHod;
+    }
+
+    // 4. students collection:
+    // Protects student profiles. Restricts critical fields from being updated by students.
+    match /students/{uid} {
+      allow read: if isAuthenticated() && (
+        isOwner(uid) || 
+        isSuperAdmin() ||
+        isTeacher()
+      );
+      
+      allow create, delete: if false;
+      allow update: if isAuthenticated() && isOwner(uid) &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.departmentId == resource.data.departmentId &&
+        request.resource.data.semester == resource.data.semester &&
+        request.resource.data.section == resource.data.section &&
+        request.resource.data.batch == resource.data.batch &&
+        request.resource.data.rollNumber == resource.data.rollNumber &&
+        request.resource.data.isActive == resource.data.isActive &&
+        request.resource.data.faceRegistered == resource.data.faceRegistered &&
+        request.resource.data.deviceId == resource.data.deviceId &&
+        request.resource.data.enrolledClasses == resource.data.enrolledClasses;
+    }
+
+    // 5. classes collection:
+    // Protects class configurations. Only authorized teachers/HODs can edit.
+    match /classes/{classId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isHod() && sameDepartment(resource.data.departmentId)) ||
+        (isStudent() && request.auth.uid in resource.data.students)
+      );
+      
+      allow create: if isAuthenticated() && isTeacher();
+      
+      allow update: if isAuthenticated() && (
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isHod() && sameDepartment(resource.data.departmentId))
+      );
+      
+      allow delete: if false;
+    }
+
+    // 6. sessions collection:
+    // Protects lecture sessions. Any active user can read, only owner teacher can update.
+    match /sessions/{sessionId} {
+      allow read: if isAuthenticated() && isActive();
+      allow create: if isAuthenticated() && isTeacher();
+      allow update: if isAuthenticated() && isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // 7. attendance collection:
+    // Protects permanent attendance ledgers.
+    match /attendance/{attendanceId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        (isStudent() && resource.data.studentId == request.auth.uid) ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isHod() && sameDepartment(resource.data.departmentId))
+      );
+      
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // 8. attendanceSummary collection:
+    // Protects calculated attendance aggregates. No client writes.
+    match /attendanceSummary/{summaryId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        (isStudent() && resource.data.studentId == request.auth.uid) ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isHod() && sameDepartment(resource.data.departmentId))
+      );
+      
+      allow write: if false;
+    }
+
+    // 9. notifications collection:
+    // Protects user notifications. Users can only update their own isRead status.
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+      
+      allow update: if isAuthenticated() && resource.data.recipientId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+        
+      allow create, delete: if false;
+    }
+
+    // 10. disputes collection:
+    // Protects student disputes. Students create, Teachers resolve.
+    match /disputes/{disputeId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        (isStudent() && resource.data.studentId == request.auth.uid) ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isHod() && sameDepartment(resource.data.departmentId))
+      );
+      
+      allow create: if isAuthenticated() && isStudent() && request.resource.data.studentId == request.auth.uid;
+      
+      allow update: if isAuthenticated() && isTeacher() && resource.data.teacherId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'teacherComment', 'resolvedAt']);
+        
+      allow delete: if false;
+    }
+
+    // 11. fraudFlags collection:
+    // Protects fraud detection events. No client writes.
+    match /fraudFlags/{flagId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+        (isHod() && sameDepartment(resource.data.departmentId))
+      );
+      
+      allow write: if false;
+    }
+
+    // 12. audit_logs collection:
+    // Protects system immutable logs. Completely locked from client.
+    match /audit_logs/{logId} {
+      allow read, write: if false;
+    }
+
+  }
+}
+
+/*
+================================================================================
+HOW TO TEST IN FIREBASE RULES PLAYGROUND:
+================================================================================
+
+Test 1: Student tries to read another student's attendance (should DENY)
+1. Set Location: /attendance/test_doc
+2. Set Auth Provider to "Google", input your UID as "student123".
+3. Add a Mock Document under /attendance/test_doc with field: studentId: "otherStudent456"
+4. Run READ -> Result: DENIED
+
+Test 2: Teacher reads their own class (should ALLOW)
+1. Set Location: /classes/test_class
+2. Set Auth Provider to "Google", input your UID as "teacher123".
+3. Add a Mock Document under /classes/test_class with field: teacherId: "teacher123".
+4. Add Mock Document under /teachers/teacher123 with field: role: "teacher"
+5. Run READ -> Result: ALLOWED
+
+Test 3: Student reads their own attendance (should ALLOW)
+1. Set Location: /attendance/test_doc
+2. Set Auth Provider to "Google", input your UID as "student123".
+3. Add a Mock Document under /attendance/test_doc with field: studentId: "student123"
+4. Add Mock Document under /students/student123 with field: role: "student"
+5. Run READ -> Result: ALLOWED
+
+Test 4: Anyone tries to write to audit_logs (should DENY)
+1. Set Location: /audit_logs/new_log
+2. Set Auth Provider to "Google", input your UID as "user123".
+3. Run CREATE -> Result: DENIED
+
+Test 5: HOD reads all classes in their department (should ALLOW)
+1. Set Location: /classes/test_class
+2. Set Auth Provider to "Google", input your UID as "hod123".
+3. Add Mock Document under /classes/test_class with field: departmentId: "CS"
+4. Add Mock Document under /teachers/hod123 with fields: 
+   role: "hod", isHod: true, departmentId: "CS"
+5. Run READ -> Result: ALLOWED
+*/

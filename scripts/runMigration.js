@@ -1,262 +1,284 @@
-import { admin, db } from '../config/firebase.js'
+// Safe to run multiple times - only adds missing fields, never overwrites existing values
+import admin from 'firebase-admin';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const serviceAccount = require('../smart-attendance-app-2f038-firebase-adminsdk-fbsvc-79631dd66a.json');
 
-async function runMigration() {
-    console.log('🚀 Starting Database Migration Script...\n')
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+});
 
-    const summary = {
-        students: 0,
-        teachers: 0,
-        classes: 0,
-        sessions: 0,
-        attendance: 0
+const db = admin.firestore();
+const FieldValue = admin.firestore.FieldValue;
+
+const val = (existing, fallback) =>
+    existing !== undefined && existing !== null ? existing : fallback;
+
+async function processInBatches(collectionName, updateLogic) {
+    const snapshot = await db.collection(collectionName).get();
+    let updatedCount = 0;
+
+    const chunks = [];
+    let currentChunk = [];
+
+    snapshot.docs.forEach(doc => {
+        currentChunk.push(doc);
+        if (currentChunk.length === 400) {
+            chunks.push(currentChunk);
+            currentChunk = [];
+        }
+    });
+    if (currentChunk.length > 0) chunks.push(currentChunk);
+
+    for (const chunk of chunks) {
+        const batch = db.batch();
+        let batchHasUpdates = false;
+
+        for (const doc of chunk) {
+            const data = doc.data();
+            const updates = updateLogic(doc.id, data);
+
+            if (Object.keys(updates).length > 0) {
+                batch.update(doc.ref, updates);
+                batchHasUpdates = true;
+                updatedCount++;
+            }
+        }
+
+        if (batchHasUpdates) {
+            await batch.commit();
+        }
     }
 
-    try {
-        // ============================================
-        // 1. MIGRATE STUDENTS
-        // ============================================
-        console.log('Fetching students...')
-        const studentsSnapshot = await db.collection('students').get()
-        console.log(`Updating ${studentsSnapshot.size} documents in students...`)
-
-        let currentBatch = db.batch()
-        let batchCount = 0
-
-        for (const doc of studentsSnapshot.docs) {
-            const data = doc.data()
-            const updates = {}
-
-            if (data.semester === undefined) updates.semester = null
-            if (data.branch === undefined) updates.branch = null
-            if (data.department === undefined) updates.department = null
-            if (data.fcmToken === undefined) updates.fcmToken = null
-            if (data.profilePhotoUrl === undefined) updates.profilePhotoUrl = null
-            if (data.isActive === undefined) updates.isActive = true
-            if (data.lastLoginAt === undefined) updates.lastLoginAt = null
-            if (data.faceRegistered === undefined) {
-                updates.faceRegistered = Array.isArray(data.faceDescriptor) ? true : false
-            }
-
-            if (Object.keys(updates).length > 0) {
-                updates.updatedAt = admin.firestore.FieldValue.serverTimestamp()
-                currentBatch.update(doc.ref, updates)
-                batchCount++
-                summary.students++
-
-                if (batchCount === 500) {
-                    await currentBatch.commit()
-                    currentBatch = db.batch()
-                    batchCount = 0
-                }
-            }
-        }
-
-        if (batchCount > 0) await currentBatch.commit()
-        console.log(`✅ Done: ${summary.students} students updated.\n`)
-
-
-        // ============================================
-        // 2. MIGRATE TEACHERS
-        // ============================================
-        console.log('Fetching teachers...')
-        const teachersSnapshot = await db.collection('teachers').get()
-        console.log(`Updating ${teachersSnapshot.size} documents in teachers...`)
-
-        currentBatch = db.batch()
-        batchCount = 0
-
-        for (const doc of teachersSnapshot.docs) {
-            const data = doc.data()
-            const updates = {}
-
-            if (data.fcmToken === undefined) updates.fcmToken = null
-            if (data.profilePhotoUrl === undefined) updates.profilePhotoUrl = null
-            if (data.isActive === undefined) updates.isActive = true
-            if (data.lastLoginAt === undefined) updates.lastLoginAt = null
-
-            if (Object.keys(updates).length > 0) {
-                updates.updatedAt = admin.firestore.FieldValue.serverTimestamp()
-                currentBatch.update(doc.ref, updates)
-                batchCount++
-                summary.teachers++
-
-                if (batchCount === 500) {
-                    await currentBatch.commit()
-                    currentBatch = db.batch()
-                    batchCount = 0
-                }
-            }
-        }
-
-        if (batchCount > 0) await currentBatch.commit()
-        console.log(`✅ Done: ${summary.teachers} teachers updated.\n`)
-
-
-        // ============================================
-        // 3. MIGRATE CLASSES
-        // ============================================
-        console.log('Fetching classes...')
-        const classesSnapshot = await db.collection('classes').get()
-        console.log(`Updating ${classesSnapshot.size} documents in classes...`)
-
-        currentBatch = db.batch()
-        batchCount = 0
-
-        for (const doc of classesSnapshot.docs) {
-            const data = doc.data()
-            const updates = {}
-
-            if (data.semester === undefined) updates.semester = null
-            if (data.academicYear === undefined) updates.academicYear = '2024-25'
-            if (data.totalSessions === undefined) updates.totalSessions = 0
-            if (data.isActive === undefined) updates.isActive = true
-
-            if (Object.keys(updates).length > 0) {
-                updates.updatedAt = admin.firestore.FieldValue.serverTimestamp()
-                currentBatch.update(doc.ref, updates)
-                batchCount++
-                summary.classes++
-
-                if (batchCount === 500) {
-                    await currentBatch.commit()
-                    currentBatch = db.batch()
-                    batchCount = 0
-                }
-            }
-        }
-
-        if (batchCount > 0) await currentBatch.commit()
-        console.log(`✅ Done: ${summary.classes} classes updated.\n`)
-
-
-        // ============================================
-        // 4. MIGRATE SESSIONS
-        // ============================================
-        console.log('Fetching sessions...')
-        const sessionsSnapshot = await db.collection('sessions').get()
-        console.log(`Updating ${sessionsSnapshot.size} documents in sessions...`)
-
-        currentBatch = db.batch()
-        batchCount = 0
-
-        for (const doc of sessionsSnapshot.docs) {
-            const data = doc.data()
-            const updates = {}
-
-            if (data.autoAbsentMinutes === undefined) updates.autoAbsentMinutes = 5
-            if (data.totalStudents === undefined) updates.totalStudents = 0
-            if (data.subjectName === undefined) updates.subjectName = 'Unknown Subject'
-            if (data.qrRefreshInterval === undefined) updates.qrRefreshInterval = (data.method === 'qrcode') ? 30 : null
-            if (data.qrLastRefreshed === undefined) updates.qrLastRefreshed = null
-            if (data.radiusMeters === undefined) updates.radiusMeters = (data.method === 'gps') ? 50 : null
-            if (data.bleSessionCode === undefined) updates.bleSessionCode = null
-            if (data.expectedSSID === undefined) updates.expectedSSID = null
-            if (data.endTime === undefined) updates.endTime = null
-
-            if (Object.keys(updates).length > 0) {
-                currentBatch.update(doc.ref, updates)
-                batchCount++
-                summary.sessions++
-
-                if (batchCount === 500) {
-                    await currentBatch.commit()
-                    currentBatch = db.batch()
-                    batchCount = 0
-                }
-            }
-        }
-
-        if (batchCount > 0) await currentBatch.commit()
-        console.log(`✅ Done: ${summary.sessions} sessions updated.\n`)
-
-
-        // ============================================
-        // 5. MIGRATE ATTENDANCE
-        // ============================================
-        console.log('Fetching attendance...')
-        const attendanceSnapshot = await db.collection('attendance').get()
-        console.log(`Updating ${attendanceSnapshot.size} documents in attendance (Processing sequentially)...`)
-
-        for (const doc of attendanceSnapshot.docs) {
-            const data = doc.data()
-            const updates = {}
-
-            // 1 & 2: Data fetching if missing corresponding fields
-            const needsStudentFetch = (data.studentName === undefined || data.studentCollegeId === undefined)
-            const needsSessionFetch = (data.classId === undefined || data.teacherId === undefined)
-
-            let studentData = null
-            let sessionData = null
-
-            if (needsStudentFetch && data.studentId) {
-                const studentDoc = await db.collection('students').doc(data.studentId).get()
-                if (studentDoc.exists) studentData = studentDoc.data()
-            }
-
-            if (needsSessionFetch && data.sessionId) {
-                const sessionDoc = await db.collection('sessions').doc(data.sessionId).get()
-                if (sessionDoc.exists) sessionData = sessionDoc.data()
-            }
-
-            // Populate updates dictionary based on fetched data or defaults
-            if (data.studentName === undefined) updates.studentName = studentData?.name || 'Unknown Student'
-            if (data.studentCollegeId === undefined) updates.studentCollegeId = studentData?.studentId || 'Unknown ID'
-
-            if (data.classId === undefined) updates.classId = sessionData?.classId || 'Unknown Class'
-            if (data.teacherId === undefined) updates.teacherId = sessionData?.teacherId || 'Unknown Teacher'
-
-            if (data.teacherApproved === undefined) {
-                if (data.status === 'late') updates.teacherApproved = null
-                else if (data.status === 'present') updates.teacherApproved = true
-                else if (data.status === 'absent') updates.teacherApproved = false
-                else updates.teacherApproved = null
-            }
-
-            if (data.approvedAt === undefined) updates.approvedAt = null
-            if (data.autoAbsent === undefined) updates.autoAbsent = false
-            if (data.faceScore === undefined) updates.faceScore = null
-
-            if (data.joinedAt === undefined) updates.joinedAt = data.createdAt || null
-            if (data.markedAt === undefined) updates.markedAt = data.createdAt || null
-
-            if (data.studentLat === undefined) updates.studentLat = null
-            if (data.studentLng === undefined) updates.studentLng = null
-            if (data.distanceFromClass === undefined) updates.distanceFromClass = null
-            if (data.networkSSID === undefined) updates.networkSSID = null
-            if (data.bleRSSI === undefined) updates.bleRSSI = null
-
-            if (Object.keys(updates).length > 0) {
-                await doc.ref.update(updates)
-                summary.attendance++
-
-                // Minor console log to not overflow stdout, print every 50 records
-                if (summary.attendance % 50 === 0) {
-                    console.log(`   ... processed ${summary.attendance} attendance updates ...`)
-                }
-            }
-        }
-        console.log(`✅ Done: ${summary.attendance} attendance documents updated.\n`)
-
-
-        // ============================================
-        // SUMMARY REPORT
-        // ============================================
-        console.log('============================================')
-        console.log('🎉 MIGRATION COMPLETE: SUMMARY')
-        console.log('============================================')
-        console.log(`- Students updated:   ${summary.students}`)
-        console.log(`- Teachers updated:   ${summary.teachers}`)
-        console.log(`- Classes updated:    ${summary.classes}`)
-        console.log(`- Sessions updated:   ${summary.sessions}`)
-        console.log(`- Attendance updated: ${summary.attendance}`)
-        console.log('============================================')
-
-    } catch (error) {
-        console.error('\n❌ FATAL ERROR DURING MIGRATION:', error.message)
-        console.error(error.stack)
-    }
-
-    process.exit(0)
+    return updatedCount;
 }
 
-runMigration()
+async function main() {
+    try {
+        const stats = { teachers: 0, students: 0, classes: 0, sessions: 0, attendance: 0 };
+
+        // 1. UPDATE teachers
+        console.log("🔄 Processing teachers...");
+        stats.teachers = await processInBatches('teachers', (id, data) => {
+            const updates = {};
+            const fields = {
+                phone: null,
+                profilePhotoUrl: null,
+                departmentId: null,
+                departmentName: null,
+                designation: null,
+                isHod: false,
+                subjectsTaught: [],
+                fcmToken: null,
+                isActive: true,
+                lastLoginAt: null
+            };
+
+            for (const [key, fallback] of Object.entries(fields)) {
+                if (val(data[key], undefined) === undefined) {
+                    updates[key] = fallback;
+                }
+            }
+
+            if (val(data.updatedAt, undefined) === undefined) {
+                updates.updatedAt = FieldValue.serverTimestamp();
+            }
+
+            return updates;
+        });
+        console.log(`✅ Teachers done: ${stats.teachers} updated`);
+
+        // 2. UPDATE students
+        console.log("🔄 Processing students...");
+        stats.students = await processInBatches('students', (id, data) => {
+            const updates = {};
+
+            const faceRegisteredFallback = Array.isArray(data.faceDescriptor) && data.faceDescriptor.length > 0;
+
+            const fields = {
+                phone: null,
+                profilePhotoUrl: null,
+                rollNumber: val(data.studentId, null),
+                departmentId: null,
+                departmentName: null,
+                semester: null,
+                section: null,
+                batch: null,
+                faceRegistered: faceRegisteredFallback,
+                deviceId: null,
+                fcmToken: null,
+                attendanceWarned: false,
+                isActive: true,
+                lastLoginAt: null
+            };
+
+            for (const [key, fallback] of Object.entries(fields)) {
+                if (val(data[key], undefined) === undefined) {
+                    updates[key] = fallback;
+                }
+            }
+
+            if (val(data.updatedAt, undefined) === undefined) {
+                updates.updatedAt = FieldValue.serverTimestamp();
+            }
+
+            return updates;
+        });
+        console.log(`✅ Students done: ${stats.students} updated`);
+
+        // 3. UPDATE classes
+        console.log("🔄 Processing classes...");
+        stats.classes = await processInBatches('classes', (id, data) => {
+            const updates = {};
+            const fields = {
+                departmentId: null,
+                departmentName: null,
+                teacherName: null,
+                semester: null,
+                section: null,
+                batch: null,
+                academicYear: '2024-25',
+                totalSessions: 0,
+                minAttendance: 75,
+                isActive: true
+            };
+
+            for (const [key, fallback] of Object.entries(fields)) {
+                if (val(data[key], undefined) === undefined) {
+                    updates[key] = fallback;
+                }
+            }
+
+            if (val(data.updatedAt, undefined) === undefined) {
+                updates.updatedAt = FieldValue.serverTimestamp();
+            }
+
+            return updates;
+        });
+        console.log(`✅ Classes done: ${stats.classes} updated`);
+
+        // 4. UPDATE sessions
+        console.log("🔄 Processing sessions...");
+        stats.sessions = await processInBatches('sessions', (id, data) => {
+            const updates = {};
+            const fields = {
+                teacherName: null,
+                departmentId: null,
+                subjectName: null,
+                subjectCode: null,
+                semester: null,
+                section: null,
+                batch: null,
+                academicYear: '2024-25',
+                faceRequired: false,
+                autoAbsentMinutes: 5,
+                totalStudents: 0,
+                roomNumber: null,
+                buildingName: null,
+                qrRefreshInterval: null,
+                qrLastRefreshed: null,
+                teacherLat: null,
+                teacherLng: null,
+                radiusMeters: null,
+                expectedSSID: null,
+                bleSessionCode: null,
+                endTime: null
+            };
+
+            for (const [key, fallback] of Object.entries(fields)) {
+                if (val(data[key], undefined) === undefined) {
+                    updates[key] = fallback;
+                }
+            }
+
+            return updates;
+        });
+        console.log(`✅ Sessions done: ${stats.sessions} updated`);
+
+        // 5. UPDATE attendance
+        console.log("🔄 Processing attendance...");
+        const attendanceSnapshot = await db.collection('attendance').get();
+        let attendanceUpdatedCount = 0;
+
+        for (const doc of attendanceSnapshot.docs) {
+            const data = doc.data();
+            const updates = {};
+
+            let studentDocData = {};
+            let sessionDocData = {};
+
+            if (data.studentId) {
+                // Step A: fetch the student document using studentId field
+                const sQuery = await db.collection('students').where('studentId', '==', data.studentId).limit(1).get();
+                if (!sQuery.empty) {
+                    studentDocData = sQuery.docs[0].data();
+                } else {
+                    const sDoc = await db.collection('students').doc(data.studentId).get();
+                    if (sDoc.exists) studentDocData = sDoc.data();
+                }
+            }
+
+            if (data.sessionId) {
+                // Step B: fetch the session document using sessionId field
+                const sessQuery = await db.collection('sessions').where('sessionId', '==', data.sessionId).limit(1).get();
+                if (!sessQuery.empty) {
+                    sessionDocData = sessQuery.docs[0].data();
+                } else {
+                    const sessDoc = await db.collection('sessions').doc(data.sessionId).get();
+                    if (sessDoc.exists) sessionDocData = sessDoc.data();
+                }
+            }
+
+            let teacherApprovedVal = null;
+            if (data.status === 'present') teacherApprovedVal = true;
+            else if (data.status === 'absent') teacherApprovedVal = false;
+            else if (data.status === 'late') teacherApprovedVal = null;
+
+            const fields = {
+                studentName: val(studentDocData.name, null),
+                studentRollNumber: val(studentDocData.rollNumber, val(studentDocData.studentId, null)),
+                classId: val(sessionDocData.classId, null),
+                teacherId: val(sessionDocData.teacherId, null),
+                departmentId: val(sessionDocData.departmentId, null),
+                semester: val(sessionDocData.semester, null),
+                section: val(sessionDocData.section, null),
+                teacherApproved: teacherApprovedVal,
+                approvedAt: null,
+                autoAbsent: false,
+                faceScore: null,
+                deviceId: null,
+                deviceBlocked: false,
+                isSuspicious: false,
+                suspiciousReason: null,
+                studentLat: null,
+                studentLng: null,
+                distanceFromClass: null,
+                networkSSID: null,
+                bleRSSI: null,
+                joinedAt: val(data.createdAt, null),
+                markedAt: val(data.createdAt, null)
+            };
+
+            for (const [key, fallback] of Object.entries(fields)) {
+                if (val(data[key], undefined) === undefined) {
+                    updates[key] = fallback;
+                }
+            }
+
+            if (Object.keys(updates).length > 0) {
+                await doc.ref.update(updates);
+                attendanceUpdatedCount++;
+            }
+        }
+        stats.attendance = attendanceUpdatedCount;
+        console.log(`✅ Attendance done: ${stats.attendance} updated`);
+
+        console.log("\n📊 FINAL MIGRATION SUMMARY");
+        console.table(stats);
+
+    } catch (error) {
+        console.error("Migration failed:\n", error);
+    }
+}
+
+main();

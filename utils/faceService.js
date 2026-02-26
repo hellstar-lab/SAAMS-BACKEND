@@ -8,8 +8,8 @@ import * as tf from '@tensorflow/tfjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
 
-// Import the pure NodeJS CJS dist to avoid Ubuntu WASM container crashes
-const faceapi = require('@vladmandic/face-api/dist/face-api.node.js')
+// Import the NodeJS WASM compatible dist to avoid tfjs-node compilation and TextEncoder issues
+const faceapi = require('@vladmandic/face-api/dist/face-api.node-wasm.js')
 
 // Load models directly from the npm package — always available after `npm install`
 // No separate copy/download step needed on any platform.
