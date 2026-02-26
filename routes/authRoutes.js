@@ -1,5 +1,5 @@
 import express from 'express'
-import { verifyToken } from '../middleware/authMiddleware.js'
+import { verifyToken, verifyFirebaseToken } from '../middleware/authMiddleware.js'
 import {
     registerStudent,
     registerTeacher,
@@ -33,7 +33,7 @@ router.post('/login', login)
 // ─── Protected routes (require valid Firebase token) ──────────────────────────
 
 // Get authenticated user's profile
-router.get('/profile', verifyToken, getProfile)
+router.get('/profile', verifyFirebaseToken, getProfile)
 
 // Update authenticated user's profile (whitelist-only fields)
 router.patch('/profile', verifyToken, updateProfile)

@@ -136,3 +136,25 @@ export const verifyToken = async (req, res, next) => {
         return res.status(401).json({ success: false, error: 'Invalid token', code: 'INVALID_TOKEN' })
     }
 }
+
+export const verifyFirebaseToken = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ success: false, error: 'Authorization token is required', code: 'AUTH_REQUIRED' })
+        }
+
+        const token = authHeader.split('Bearer ')[1]
+        const decoded = await auth.verifyIdToken(token)
+
+        req.user = {
+            uid: decoded.uid,
+            email: decoded.email
+        }
+        return next()
+
+    } catch (error) {
+        console.error('verifyFirebaseToken error:', error)
+        return res.status(401).json({ success: false, error: 'Invalid token', code: 'INVALID_TOKEN' })
+    }
+}

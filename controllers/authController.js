@@ -126,82 +126,55 @@ export const registerStudent = async (req, res, next) => {
 // POST /api/auth/register/teacher
 export const registerTeacher = async (req, res, next) => {
     try {
-        const { name, email, password, employeeId, phone, designation, fcmToken } = req.body
-
-        // Validate required fields
-        const err = validateRequired(['name', 'email', 'password', 'employeeId'], req.body)
-        if (err) return errorResponse(res, err, 400, 'VALIDATION_ERROR')
-        if (!validateEmail(email)) return errorResponse(res, 'Invalid email address', 400, 'INVALID_EMAIL')
-        if (!password || password.length < 6) return errorResponse(res, 'Password must be at least 6 characters', 400, 'WEAK_PASSWORD')
-
-        // Create Firebase Auth user
-        let newUser
-        try {
-            newUser = await auth.createUser({
-                email: email.toLowerCase().trim(),
-                password,
-                displayName: name.trim()
-            })
-        } catch (e) {
-            if (e.code === 'auth/email-already-exists') return errorResponse(res, 'Email already registered', 409, 'EMAIL_EXISTS')
-            if (e.code === 'auth/invalid-email') return errorResponse(res, 'Invalid email address', 400, 'INVALID_EMAIL')
-            if (e.code === 'auth/weak-password') return errorResponse(res, 'Password is too weak', 400, 'WEAK_PASSWORD')
-            throw e
+        const authHeader = req.headers.authorization
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ success: false, error: 'Missing or invalid Authorization header', code: 'UNAUTHORIZED' })
         }
 
-        // Create Firestore document with COMPLETE teacher schema
+        const idToken = authHeader.split('Bearer ')[1]
+        let decodedToken
+        try {
+            decodedToken = await admin.auth().verifyIdToken(idToken)
+        } catch (error) {
+            return res.status(401).json({ success: false, error: 'Invalid or expired token', code: 'UNAUTHORIZED' })
+        }
+
+        const { uid, email } = decodedToken
+        if (!email) {
+             return res.status(400).json({ success: false, error: 'Token does not contain email', code: 'INVALID_TOKEN' })
+        }
+
+        const { name, employeeId, designation } = req.body
+
+        const err = validateRequired(['name', 'employeeId', 'designation'], req.body)
+        if (err) return res.status(400).json({ success: false, error: err, code: 'VALIDATION_ERROR' })
+
+        // Check if teacher already exists in firestore
+        const existingDoc = await db.collection('teachers').doc(uid).get()
+        if (existingDoc.exists) {
+            return res.status(409).json({ success: false, error: 'Teacher already registered', code: 'ALREADY_EXISTS' })
+        }
+
         const teacherData = {
-            teacherId: newUser.uid,
-            name: name.trim(),
+            uid: uid,
             email: email.toLowerCase().trim(),
-            role: 'teacher',
-            phone: phone || null,
-            profilePhotoUrl: null,
+            name: name.trim(),
             employeeId: employeeId.trim(),
+            designation: designation.trim(),
+            role: 'TEACHER',
             departmentId: null,
             departmentName: null,
-            designation: designation || null,
             isHod: false,
-            subjectsTaught: [],
-            fcmToken: fcmToken || null,
-            isActive: true,
-            lastLoginAt: FieldValue.serverTimestamp(),
-            createdAt: FieldValue.serverTimestamp(),
-            updatedAt: FieldValue.serverTimestamp()
+            createdAt: FieldValue.serverTimestamp()
         }
 
-        await db.collection('teachers').doc(newUser.uid).set(teacherData)
+        await db.collection('teachers').doc(uid).set(teacherData)
 
-        // Fire and forget audit log
-        logAction(
-            db,
-            ACTIONS.ACCOUNT_CREATED,
-            newUser.uid,
-            ACTOR_ROLES.TEACHER,
-            newUser.uid,
-            TARGET_TYPES.TEACHER,
-            createDetails({
-                name: name.trim(),
-                email: email.toLowerCase().trim(),
-                employeeId: employeeId.trim(),
-                designation: designation || null
-            }),
-            null,
-            req.ip
-        )
-
-        return successResponse(res, {
-            uid: newUser.uid,
-            name: name.trim(),
-            email: email.toLowerCase().trim(),
-            role: 'teacher',
-            employeeId: employeeId.trim(),
-            message: 'Teacher registered successfully'
-        }, 201)
+        return res.status(200).json({ success: true })
 
     } catch (error) {
         console.error('registerTeacher error:', error)
-        next(error)
+        return res.status(500).json({ success: false, error: 'Internal server error', code: 'INTERNAL_ERROR' })
     }
 }
 
@@ -436,24 +409,49 @@ export const login = async (req, res, next) => {
 // GET /api/auth/profile
 export const getProfile = async (req, res, next) => {
     try {
-        const { uid, role } = req.user
-        const col = getUserCollection(role)
-        const docSnap = await db.collection(col).doc(uid).get()
+        const { uid } = req.user
 
-        if (!docSnap.exists) return errorResponse(res, 'Profile not found', 404, 'USER_NOT_FOUND')
+        let userProfile = null
 
-        const userData = docSnap.data()
+        const teacherDoc = await db.collection('teachers').doc(uid).get()
+        if (teacherDoc.exists) {
+            userProfile = teacherDoc.data()
+        } else {
+            const studentDoc = await db.collection('students').doc(uid).get()
+            if (studentDoc.exists) {
+                userProfile = studentDoc.data()
+            } else {
+                const adminDoc = await db.collection('superAdmin').doc(uid).get()
+                if (adminDoc.exists) {
+                    userProfile = adminDoc.data()
+                }
+            }
+        }
 
-        // Exclude sensitive fields
-        const { faceDescriptor, fcmToken, password, ...safeData } = userData
+        if (!userProfile) {
+            return res.status(404).json({ success: false, error: 'User not found' })
+        }
 
-        return successResponse(res, {
-            user: { ...safeData, collection: col }
+        return res.status(200).json({
+            success: true,
+            data: {
+                uid: userProfile.uid || userProfile.teacherId || userProfile.studentId || uid,
+                email: userProfile.email,
+                name: userProfile.name,
+                role: userProfile.role || 'TEACHER',
+                departmentId: userProfile.departmentId || null,
+                departmentName: userProfile.departmentName || null,
+                isHod: userProfile.isHod || false,
+                rollNumber: userProfile.rollNumber,
+                semester: userProfile.semester,
+                section: userProfile.section,
+                employeeId: userProfile.employeeId,
+                designation: userProfile.designation
+            }
         })
-
     } catch (error) {
         console.error('getProfile error:', error)
-        next(error)
+        return res.status(500).json({ success: false, error: 'Internal server error', code: 'INTERNAL_ERROR' })
     }
 }
 
