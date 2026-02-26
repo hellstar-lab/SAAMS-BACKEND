@@ -226,10 +226,23 @@ export const getMyClasses = async (req, res, next) => {
 
         const snapshot = await query.get()
 
+        // Fetch active sessions for this teacher to enrich the class list
+        const activeSessionsSnapshot = await db.collection('sessions')
+            .where('teacherId', '==', req.user.uid)
+            .where('status', '==', 'active')
+            .get()
+        
+        const activeSessionMap = {}
+        activeSessionsSnapshot.forEach(doc => {
+            const sessData = doc.data()
+            activeSessionMap[sessData.classId] = doc.id
+        })
+
         const classes = snapshot.docs.map(doc => {
             const data = doc.data()
+            const classId = data.classId || doc.id
             return {
-                classId: data.classId || doc.id,
+                classId,
                 subjectName: data.subjectName,
                 subjectCode: data.subjectCode,
                 semester: data.semester,
@@ -241,6 +254,8 @@ export const getMyClasses = async (req, res, next) => {
                 totalSessions: data.totalSessions || 0,
                 minAttendance: data.minAttendance,
                 isActive: data.isActive,
+                hasActiveSession: !!activeSessionMap[classId],
+                activeSessionId: activeSessionMap[classId] || null,
                 createdAt: data.createdAt
             }
         })

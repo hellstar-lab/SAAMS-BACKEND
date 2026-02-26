@@ -155,16 +155,18 @@ export const registerTeacher = async (req, res, next) => {
             return res.status(409).json({ success: false, error: 'Teacher already registered', code: 'ALREADY_EXISTS' })
         }
 
+        const isHod = designation.trim().toUpperCase() === 'HOD'
+
         const teacherData = {
             uid: uid,
             email: email.toLowerCase().trim(),
             name: name.trim(),
             employeeId: employeeId.trim(),
             designation: designation.trim(),
-            role: 'TEACHER',
+            role: isHod ? 'HOD' : 'TEACHER',
             departmentId: null,
             departmentName: null,
-            isHod: false,
+            isHod: isHod,
             createdAt: FieldValue.serverTimestamp()
         }
 
@@ -392,9 +394,15 @@ export const login = async (req, res, next) => {
         }
 
         // Include teacher-only fields
-        if (userProfile.role === 'teacher' || userProfile.role === 'hod') {
+        if (userProfile.role === 'teacher' || userProfile.role === 'hod' || userProfile.role === 'TEACHER' || userProfile.role === 'HOD' || userProfile.designation) {
             responseData.employeeId = userProfile.employeeId || null
             responseData.designation = userProfile.designation || null
+            
+            // Dynamic override if designation is HOD
+            if (responseData.designation && responseData.designation.toUpperCase() === 'HOD') {
+                responseData.role = 'HOD'
+                responseData.isHod = true
+            }
         }
 
         return successResponse(res, { message: 'Login successful', ...responseData })
@@ -432,16 +440,18 @@ export const getProfile = async (req, res, next) => {
             return res.status(404).json({ success: false, error: 'User not found' })
         }
 
+        const isHodByDesignation = userProfile.designation && userProfile.designation.toUpperCase() === 'HOD'
+
         return res.status(200).json({
             success: true,
             data: {
                 uid: userProfile.uid || userProfile.teacherId || userProfile.studentId || uid,
                 email: userProfile.email,
                 name: userProfile.name,
-                role: userProfile.role || 'TEACHER',
+                role: isHodByDesignation ? 'HOD' : (userProfile.role || 'TEACHER'),
                 departmentId: userProfile.departmentId || null,
                 departmentName: userProfile.departmentName || null,
-                isHod: userProfile.isHod || false,
+                isHod: isHodByDesignation ? true : (userProfile.isHod || false),
                 rollNumber: userProfile.rollNumber,
                 semester: userProfile.semester,
                 section: userProfile.section,
