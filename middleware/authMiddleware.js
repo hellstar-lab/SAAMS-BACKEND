@@ -59,7 +59,7 @@ export const verifyToken = async (req, res, next) => {
 
                 req.user = {
                     uid: decoded.uid,
-                    role: 'student',
+                    role: userData.role || 'student',
                     departmentId: userData.departmentId || null,
                     departmentName: userData.departmentName || null,
                     isHod: false,
@@ -86,7 +86,7 @@ export const verifyToken = async (req, res, next) => {
 
                 req.user = {
                     uid: decoded.uid,
-                    role: 'superAdmin',
+                    role: userData.role || 'superAdmin',
                     departmentId: null,
                     departmentName: null,
                     isHod: false,

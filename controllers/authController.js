@@ -163,7 +163,7 @@ export const registerTeacher = async (req, res, next) => {
             name: name.trim(),
             employeeId: employeeId.trim(),
             designation: designation.trim(),
-            role: isHod ? 'HOD' : 'TEACHER',
+            role: isHod ? 'hod' : 'teacher',
             departmentId: null,
             departmentName: null,
             isHod: isHod,
