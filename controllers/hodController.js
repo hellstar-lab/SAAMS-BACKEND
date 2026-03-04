@@ -38,6 +38,20 @@ const verifyHodAccess = (req, res, targetDepartmentId) => {
     return true;
 };
 
+// Same as verifyHodAccess but also allows teachers (e.g. student search for enrollment)
+const verifyHodOrTeacherAccess = (req, res, targetDepartmentId) => {
+    const { role, isHod, departmentId } = req.user;
+    if (!isHod && role !== 'teacher' && role !== 'superAdmin') {
+        errorResponse(res, 'HOD or Teacher role required', 403, 'HOD_ONLY');
+        return false;
+    }
+    if (role !== 'superAdmin' && departmentId !== targetDepartmentId) {
+        errorResponse(res, 'Not authorized for this department', 403, 'UNAUTHORIZED_DEPARTMENT');
+        return false;
+    }
+    return true;
+};
+
 // ━━━ 1: GET DEPARTMENT OVERVIEW ━━━
 export const getDepartmentOverview = async (req, res, next) => {
     try {
@@ -240,7 +254,7 @@ export const removeTeacherFromDepartment = async (req, res, next) => {
 export const getDepartmentStudents = async (req, res, next) => {
     try {
         const deptId = req.user.departmentId;
-        if (!verifyHodAccess(req, res, deptId)) return;
+        if (!verifyHodOrTeacherAccess(req, res, deptId)) return;
 
         const { semester, section, isActive, searchQuery } = req.query;
 
