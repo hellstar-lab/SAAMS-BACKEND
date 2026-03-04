@@ -644,7 +644,9 @@ export const getClassStudents = async (req, res, next) => {
                 const summary = summaryDocs[index].exists ? summaryDocs[index].data() : null
                 return {
                     studentId: doc.id,
+                    uid: doc.id,
                     name: student.name,
+                    email: student.email,
                     rollNumber: student.rollNumber,
                     semester: student.semester,
                     section: student.section,
