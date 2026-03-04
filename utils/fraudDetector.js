@@ -11,6 +11,25 @@
 import { FieldValue } from 'firebase-admin/firestore';
 
 /**
+ * Writes a lightweight fraud signal to the `fraudAlerts` collection.
+ * This is the real-time feed for the Teacher App's live listener.
+ * Never throws — fraud checks must not crash the attendance flow.
+ */
+const writeFraudAlert = async (db, sessionId, classId, studentId, reason) => {
+    try {
+        await db.collection('fraudAlerts').add({
+            sessionId,
+            classId,
+            studentId,
+            reason,
+            detectedAt: FieldValue.serverTimestamp(),
+        });
+    } catch (err) {
+        console.error('writeFraudAlert error:', err);
+    }
+};
+
+/**
  * Calculates distance between two given coordinates in meters
  */
 const haversineMeters = (lat1, lng1, lat2, lng2) => {
@@ -53,6 +72,9 @@ const checkDuplicateDevice = async (db, deviceId, studentId, studentName, sessio
                 autoAction: 'blocked',
                 createdAt: FieldValue.serverTimestamp()
             });
+
+            // Real-time alert for teacher app listener
+            await writeFraudAlert(db, sessionId, classId, studentId, 'duplicate_device');
 
             return {
                 isFraud: true, type: 'duplicate_device', flagId: docRef.id,
@@ -103,6 +125,9 @@ const checkGPSProximity = async (db, studentId, studentName, studentLat, student
                     autoAction: 'flagged',
                     createdAt: FieldValue.serverTimestamp()
                 });
+
+                // Real-time alert for teacher app listener
+                await writeFraudAlert(db, sessionId, classId, studentId, 'impossible_location');
 
                 return {
                     isFraud: true, type: 'gps_proximity', flagId: docRef.id, distanceMeters: distance,
