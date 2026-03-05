@@ -155,7 +155,8 @@ export const registerTeacher = async (req, res, next) => {
             return res.status(409).json({ success: false, error: 'Teacher already registered', code: 'ALREADY_EXISTS' })
         }
 
-        const isHod = designation.trim().toUpperCase() === 'HOD'
+        const hodKeywords = ['hod', 'head of department', 'hod & professor', 'professor & hod'];
+        const isHod = hodKeywords.includes(designation.trim().toLowerCase())
 
         const teacherData = {
             uid: uid,
@@ -396,15 +397,9 @@ export const login = async (req, res, next) => {
         }
 
         // Include teacher-only fields
-        if (userProfile.role === 'teacher' || userProfile.role === 'hod' || userProfile.role === 'TEACHER' || userProfile.role === 'HOD' || userProfile.designation) {
+        if (['teacher', 'hod', 'TEACHER', 'HOD'].includes(userProfile.role) || userProfile.designation) {
             responseData.employeeId = userProfile.employeeId || null
             responseData.designation = userProfile.designation || null
-            
-            // Dynamic override if designation is HOD
-            if (responseData.designation && responseData.designation.toUpperCase() === 'HOD') {
-                responseData.role = 'HOD'
-                responseData.isHod = true
-            }
         }
 
         return successResponse(res, { message: 'Login successful', ...responseData })
@@ -442,7 +437,8 @@ export const getProfile = async (req, res, next) => {
             return res.status(404).json({ success: false, error: 'User not found' })
         }
 
-        const isHodByDesignation = userProfile.designation && userProfile.designation.toUpperCase() === 'HOD'
+        // Always trust role stored in Firestore — never override from designation
+        const storedRole = userProfile.role || 'teacher'
 
         return res.status(200).json({
             success: true,
@@ -450,10 +446,10 @@ export const getProfile = async (req, res, next) => {
                 uid: userProfile.uid || userProfile.teacherId || userProfile.studentId || uid,
                 email: userProfile.email,
                 name: userProfile.name,
-                role: isHodByDesignation ? 'HOD' : (userProfile.role || 'TEACHER'),
+                role: storedRole,
                 departmentId: userProfile.departmentId || null,
                 departmentName: userProfile.departmentName || null,
-                isHod: isHodByDesignation ? true : (userProfile.isHod || false),
+                isHod: userProfile.isHod || false,
                 rollNumber: userProfile.rollNumber,
                 semester: userProfile.semester,
                 section: userProfile.section,

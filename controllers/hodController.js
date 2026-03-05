@@ -95,6 +95,7 @@ export const getDepartmentOverview = async (req, res, next) => {
                     totalStudents: studentsSnap.data().count,
                     totalClasses: classesSnap.data().count,
                     activeSessionsNow: sessionsSnap.data().count,
+                    activeSessions: sessionsSnap.data().count,
                     studentsAtRisk: belowThreshold.length
                 },
                 attendanceStats: stats ? {
