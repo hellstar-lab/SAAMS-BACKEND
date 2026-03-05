@@ -26,3 +26,4 @@ npm-debug.log*
 Thumbs.db
 models/*.bin
 models/*.json
+!firestore.indexes.json
