@@ -167,7 +167,9 @@ export const registerTeacher = async (req, res, next) => {
             departmentId: null,
             departmentName: null,
             isHod: isHod,
-            createdAt: FieldValue.serverTimestamp()
+            isActive: true,                          // ← REQUIRED: Firestore isActive() rule checks this
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
         }
 
         await db.collection('teachers').doc(uid).set(teacherData)
