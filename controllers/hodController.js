@@ -268,8 +268,30 @@ export const getDepartmentStudents = async (req, res, next) => {
         query = query.orderBy('name', 'asc');
         const snap = await query.get();
 
+        // 1. Fetch attendance summaries to calculate overall average per student
+        const summariesSnap = await db.collection('attendanceSummary')
+            .where('departmentId', '==', deptId)
+            .get();
+
+        const attendanceMap = {};
+        summariesSnap.docs.forEach(doc => {
+            const data = doc.data();
+            if (!attendanceMap[data.studentId]) {
+                attendanceMap[data.studentId] = { sum: 0, count: 0 };
+            }
+            attendanceMap[data.studentId].sum += (data.percentage || 0);
+            attendanceMap[data.studentId].count += 1;
+        });
+
+        // 2. Map students and attach calculated percentage
         let students = snap.docs.map(doc => {
             const d = doc.data();
+            const att = attendanceMap[d.studentId];
+            // Default to 100% if no sessions have occurred yet, otherwise average their subjects
+            const overallPercentage = att && att.count > 0 
+                ? parseFloat((att.sum / att.count).toFixed(2)) 
+                : 100;
+
             return {
                 studentId: d.studentId,
                 name: d.name,
@@ -281,6 +303,8 @@ export const getDepartmentStudents = async (req, res, next) => {
                 isActive: d.isActive,
                 faceRegistered: d.faceRegistered || false,
                 attendanceWarned: d.attendanceWarned || false,
+                percentage: overallPercentage,
+                attendance: overallPercentage, // Included for backward compatibility if frontend uses 'attendance'
                 enrolledClasses: d.enrolledClasses ? d.enrolledClasses.length : 0
             };
         });
