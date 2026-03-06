@@ -2,7 +2,7 @@ import { db, admin } from '../config/firebase.js';
 import { FieldValue } from 'firebase-admin/firestore';
 import { successResponse, errorResponse } from '../utils/responseHelper.js';
 import { isStudentLate } from '../utils/lateDetection.js';
-import { generateClassAttendanceExcel, generateDepartmentExcel } from '../utils/excelGenerator.js';
+import { generateClassAttendanceExcel, generateDepartmentExcel, generateSessionAttendanceExcel } from '../utils/excelGenerator.js';
 import { generateAttendanceCertificate, generateSessionReport } from '../utils/pdfGenerator.js';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
@@ -1221,7 +1221,7 @@ export const exportSessionExcel = async (req, res, next) => {
         const role = req.user.role;
 
         if (sessionId && typeof sessionId !== 'string') {
-            return res.status(400).json({ success: false, code: 'INVALID_INPUT', error: 'Invalid sessionId format expected string' });
+            return errorResponse(res, 'Invalid sessionId format', 400, 'INVALID_INPUT');
         }
 
         if (!sessionId) {
@@ -1230,99 +1230,38 @@ export const exportSessionExcel = async (req, res, next) => {
 
         const sessionDoc = await db.collection('sessions').doc(sessionId).get();
         if (!sessionDoc.exists) {
-            return res.status(404).json({ success: false, code: 'SESSION_NOT_FOUND', error: 'Session not found' });
+            return errorResponse(res, 'Session not found', 404, 'SESSION_NOT_FOUND');
         }
-        const session = sessionDoc.data();
+        const session = { id: sessionDoc.id, ...sessionDoc.data() };
 
         if (session.classId !== classId) {
-            return res.status(400).json({ success: false, code: 'CLASS_MISMATCH', error: 'Session does not belong to this class' });
+            return errorResponse(res, 'Session does not belong to this class', 400, 'CLASS_MISMATCH');
         }
 
         if (session.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
-            return res.status(403).json({ success: false, code: 'UNAUTHORIZED', error: 'You do not own this session' });
+            return errorResponse(res, 'Unauthorized access to session data', 403, 'UNAUTHORIZED');
         }
 
         const attSnap = await db.collection('attendance')
             .where('sessionId', '==', sessionId)
             .get();
         
-        const records = attSnap.docs.map(doc => doc.data()).sort((a, b) => {
+        const records = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => {
             const rollA = a.rollNumber || a.studentRollNumber || '';
             const rollB = b.rollNumber || b.studentRollNumber || '';
             return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
         });
 
-        const workbook = new ExcelJS.Workbook();
-        const sheet = workbook.addWorksheet('Session Report');
-
-        sheet.addRow([`Attendance Report — ${session.subjectName || 'Subject'}`]);
-        sheet.addRow([`Date: ${session.startTime ? session.startTime.toDate().toISOString().split('T')[0] : 'N/A'}`]);
-        sheet.addRow([`Method: ${session.method}`]);
-        sheet.addRow([`Room: ${session.roomNumber || 'N/A'}`]);
-        sheet.addRow([]);
-
-        const headerRow = sheet.addRow(['Roll No', 'Student Name', 'Status', 'Time Joined', 'Minutes Late']);
-        headerRow.font = { bold: true };
-
-        sheet.getColumn(1).width = 15;
-        sheet.getColumn(2).width = 25;
-        sheet.getColumn(3).width = 15;
-        sheet.getColumn(4).width = 25;
-        sheet.getColumn(5).width = 15;
-
-        let totalPresent = 0, totalLate = 0, totalAbsent = 0;
-
-        records.forEach(r => {
-            let statusText = r.status || 'unknown';
-            let color = 'FFFFFFFF';
-            let minutesLate = '';
-
-            if (r.status === 'present' || (r.status === 'late' && r.teacherApproved === true)) {
-                totalPresent++;
-                statusText = 'Present';
-                color = 'FFC6EFCE'; 
-            } else if (r.status === 'late') {
-                totalLate++;
-                statusText = 'Late';
-                color = 'FFFFEB9C'; 
-                if (r.joinedAt && session.startTime) {
-                    const mins = Math.floor((r.joinedAt.toMillis() - session.startTime.toMillis()) / 60000);
-                    minutesLate = mins > 0 ? mins : '';
-                }
-            } else if (r.status === 'absent') {
-                totalAbsent++;
-                statusText = 'Absent';
-                color = 'FFFFC7CE'; 
-            }
-
-            const timeJoined = r.joinedAt ? r.joinedAt.toDate().toLocaleString() : 'N/A';
-            const rollNo = r.rollNumber || r.studentRollNumber || 'N/A';
-            const name = r.studentName || 'N/A';
-
-            const row = sheet.addRow([rollNo, name, statusText, timeJoined, minutesLate]);
-
-            row.getCell(3).fill = {
-                type: 'pattern',
-                pattern: 'solid',
-                fgColor: { argb: color }
-            };
-            row.getCell(1).alignment = { horizontal: 'center' };
-            row.getCell(3).alignment = { horizontal: 'center' };
-        });
-
-        sheet.addRow([]);
-        const totalEnrolled = session.totalStudents || 0;
-        const pct = totalEnrolled > 0 ? ((totalPresent / totalEnrolled) * 100).toFixed(2) : 0;
-        sheet.addRow(['Summary', `Present: ${totalPresent}`, `Late: ${totalLate}`, `Absent: ${totalAbsent}`, `Attendance %: ${pct}%`]);
+        const buffer = await generateSessionAttendanceExcel(session, records);
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename="session_${sessionId}.xlsx"`);
+        
+        return res.send(buffer);
 
-        await workbook.xlsx.write(res);
-        res.end();
     } catch (error) {
         console.error('exportSessionExcel error:', error);
-        return res.status(500).json({ success: false, code: 'SERVER_ERROR', error: 'Internal server error' });
+        next(error);
     }
 };
 

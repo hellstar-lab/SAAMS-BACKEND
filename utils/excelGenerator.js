@@ -629,3 +629,90 @@ export async function generateDepartmentExcel(
     const buffer = await workbook.xlsx.writeBuffer();
     return buffer;
 }
+
+export async function generateSessionAttendanceExcel(session, records) {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'SAAMS';
+    workbook.created = new Date();
+
+    const sheet = workbook.addWorksheet('Session Report');
+
+    // Title & Metadata
+    sheet.addRow([`Attendance Report — ${session.subjectName || 'Subject'}`]);
+    
+    // Safely format date
+    const sTime = session.startTime?.toDate ? session.startTime.toDate() : new Date(session.startTime);
+    const dateStr = !isNaN(sTime.getTime()) ? sTime.toISOString().split('T')[0] : 'N/A';
+    
+    sheet.addRow([`Date: ${dateStr}`]);
+    sheet.addRow([`Method: ${session.method || 'N/A'}`]);
+    sheet.addRow([`Room: ${session.roomNumber || 'N/A'}`]);
+    sheet.addRow([]);
+
+    const headerRow = sheet.addRow(['Roll No', 'Student Name', 'Status', 'Time Joined', 'Minutes Late']);
+    headerRow.eachCell((cell) => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.headerBg } };
+        cell.font = { color: { argb: COLORS.headerText }, bold: true };
+        cell.alignment = { horizontal: 'center' };
+    });
+
+    sheet.getColumn(1).width = 15;
+    sheet.getColumn(2).width = 25;
+    sheet.getColumn(3).width = 15;
+    sheet.getColumn(4).width = 25;
+    sheet.getColumn(5).width = 15;
+
+    let totalPresent = 0, totalLate = 0, totalAbsent = 0;
+
+    records.forEach(r => {
+        let statusText = r.status || 'unknown';
+        let color = 'FFFFFFFF';
+        let minutesLate = '';
+
+        const sApproved = r.teacherApproved;
+        if (r.status === 'present' || (r.status === 'late' && sApproved === true)) {
+            totalPresent++;
+            statusText = 'Present';
+            color = COLORS.presentBg.substring(1); // ExcelJS uses ARGB hex (no #)
+        } else if (r.status === 'late') {
+            totalLate++;
+            statusText = 'Late';
+            color = COLORS.lateBg.substring(1);
+            
+            const jTime = r.joinedAt?.toDate ? r.joinedAt.toDate() : new Date(r.joinedAt);
+            if (!isNaN(jTime.getTime()) && !isNaN(sTime.getTime())) {
+                const mins = Math.floor((jTime.getTime() - sTime.getTime()) / 60000);
+                minutesLate = mins > 0 ? mins : 0;
+            }
+        } else if (r.status === 'absent' || (r.status === 'late' && sApproved === false)) {
+            totalAbsent++;
+            statusText = 'Absent';
+            color = COLORS.absentBg.substring(1);
+        }
+
+        const jTime = r.joinedAt?.toDate ? r.joinedAt.toDate() : new Date(r.joinedAt);
+        const timeJoinedStr = !isNaN(jTime.getTime()) ? jTime.toLocaleString() : 'N/A';
+        const rollNo = r.rollNumber || r.studentRollNumber || 'N/A';
+        const name = r.studentName || 'N/A';
+
+        const row = sheet.addRow([rollNo, name, statusText, timeJoinedStr, minutesLate]);
+
+        row.getCell(3).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: color || 'FFFFFF' }
+        };
+        row.getCell(1).alignment = { horizontal: 'center' };
+        row.getCell(3).alignment = { horizontal: 'center' };
+    });
+
+    sheet.addRow([]);
+    const totalEnrolled = session.totalStudents || (totalPresent + totalLate + totalAbsent);
+    const pct = totalEnrolled > 0 ? ((totalPresent / totalEnrolled) * 100).toFixed(2) : 0;
+    
+    const summaryRow = sheet.addRow(['Summary', `Present: ${totalPresent}`, `Late: ${totalLate}`, `Absent: ${totalAbsent}`, `Attendance %: ${pct}%`]);
+    summaryRow.font = { bold: true };
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return buffer;
+}
