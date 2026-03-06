@@ -1254,13 +1254,37 @@ export const exportSessionExcel = async (req, res, next) => {
             return errorResponse(res, 'Unauthorized access to session data', 403, 'UNAUTHORIZED');
         }
 
+        // 1. Fetch raw attendance records
         const attSnap = await db.collection('attendance')
             .where('sessionId', '==', sessionId)
             .get();
-        
-        const records = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => {
-            const rollA = a.rollNumber || a.studentRollNumber || '';
-            const rollB = b.rollNumber || b.studentRollNumber || '';
+        const rawRecords = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        // 2. Collect unique studentIds to enrich from students collection
+        const studentIds = [...new Set(rawRecords.map(r => r.studentId).filter(Boolean))];
+
+        // 3. Batch-fetch student profiles (Firestore 'in' limit = 30)
+        const studentMap = {};
+        for (let i = 0; i < studentIds.length; i += 30) {
+            const batch = studentIds.slice(i, i + 30);
+            const studentsSnap = await db.collection('students').where(admin.firestore.FieldPath.documentId(), 'in', batch).get();
+            studentsSnap.docs.forEach(doc => {
+                studentMap[doc.id] = doc.data();
+            });
+        }
+
+        // 4. Enrich each attendance record with real student data
+        const records = rawRecords.map(r => {
+            const studentProfile = studentMap[r.studentId] || {};
+            return {
+                ...r,
+                studentName: r.studentName || studentProfile.name || 'Unknown',
+                studentRollNumber: r.studentRollNumber || r.rollNumber || studentProfile.rollNumber || studentProfile.studentId || 'N/A',
+                rollNumber: r.rollNumber || r.studentRollNumber || studentProfile.rollNumber || studentProfile.studentId || 'N/A'
+            };
+        }).sort((a, b) => {
+            const rollA = a.studentRollNumber || '';
+            const rollB = b.studentRollNumber || '';
             return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
         });
 
@@ -1286,7 +1310,7 @@ export const exportSessionPdf = async (req, res, next) => {
         const role = req.user.role;
 
         if (sessionId && typeof sessionId !== 'string') {
-            return res.status(400).json({ success: false, code: 'INVALID_INPUT', error: 'Invalid sessionId format expected string' });
+            return errorResponse(res, 'Invalid sessionId format', 400, 'INVALID_INPUT');
         }
 
         if (!sessionId) {
@@ -1307,140 +1331,54 @@ export const exportSessionPdf = async (req, res, next) => {
             return errorResponse(res, 'Unauthorized access to session data', 403, 'UNAUTHORIZED');
         }
 
+        // 1. Fetch raw attendance records
         const attSnap = await db.collection('attendance')
             .where('sessionId', '==', sessionId)
             .get();
-        
-        const records = attSnap.docs.map(doc => doc.data()).sort((a, b) => {
-            const rollA = a.rollNumber || a.studentRollNumber || '';
-            const rollB = b.rollNumber || b.studentRollNumber || '';
+        const rawRecords = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        // 2. Collect unique studentIds to enrich from students collection
+        const studentIds = [...new Set(rawRecords.map(r => r.studentId).filter(Boolean))];
+
+        // 3. Batch-fetch student profiles (Firestore 'in' limit = 30)
+        const studentMap = {};
+        for (let i = 0; i < studentIds.length; i += 30) {
+            const batch = studentIds.slice(i, i + 30);
+            const studentsSnap = await db.collection('students').where(admin.firestore.FieldPath.documentId(), 'in', batch).get();
+            studentsSnap.docs.forEach(doc => {
+                studentMap[doc.id] = doc.data();
+            });
+        }
+
+        // 4. Enrich each attendance record with real student data
+        const records = rawRecords.map(r => {
+            const studentProfile = studentMap[r.studentId] || {};
+            return {
+                ...r,
+                studentName: r.studentName || studentProfile.name || 'Unknown',
+                studentRollNumber: r.studentRollNumber || r.rollNumber || studentProfile.rollNumber || studentProfile.studentId || 'N/A',
+                rollNumber: r.rollNumber || r.studentRollNumber || studentProfile.rollNumber || studentProfile.studentId || 'N/A'
+            };
+        }).sort((a, b) => {
+            const rollA = a.studentRollNumber || '';
+            const rollB = b.studentRollNumber || '';
             return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
         });
 
-        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        // 5. Fetch class info for the PDF context
+        const classDoc = await db.collection('classes').doc(classId).get();
+        const classInfo = classDoc.exists ? { id: classDoc.id, ...classDoc.data() } : {};
+
+        // 6. Generate PDF using the robust utility
+        const buffer = await generateSessionReport(session, records, classInfo);
+
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="session_${sessionId}.pdf"`);
-        doc.pipe(res);
+        return res.send(buffer);
 
-        // Header Section
-        doc.font('Helvetica-Bold').fontSize(16).text('Your College Name', { align: 'center' });
-        doc.font('Helvetica').fontSize(12).text('SAAMS - Smart Attendance System', { align: 'center' });
-        doc.font('Helvetica-Bold').fontSize(14).text('Attendance Report', { align: 'center' });
-        doc.moveDown();
-        doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-        doc.moveDown();
-
-        const formattedDate = session.startTime ? session.startTime.toDate().toLocaleDateString() : 'N/A';
-        const stTime = session.startTime ? session.startTime.toDate().toLocaleTimeString() : 'N/A';
-        const enTime = session.endTime ? session.endTime.toDate().toLocaleTimeString() : 'Ongoing';
-        
-        let duration = 'N/A';
-        if (session.startTime && session.endTime) {
-            const diff = Math.floor((session.endTime.toMillis() - session.startTime.toMillis()) / 60000);
-            duration = `${diff} mins`;
-        }
-
-        doc.font('Helvetica').fontSize(10);
-        doc.text(`Subject: ${session.subjectName || 'N/A'} (${session.subjectCode || 'N/A'})`);
-        doc.text(`Date: ${formattedDate}`);
-        doc.text(`Time: ${stTime} to ${enTime}`);
-        doc.text(`Duration: ${duration}`);
-        doc.text(`Method: ${session.method || 'N/A'}`);
-        doc.text(`Room: ${session.roomNumber || 'N/A'} ${session.buildingName || ''}`);
-        doc.text(`Teacher: ${session.teacherName || 'N/A'}`);
-        doc.moveDown();
-
-        const startY = doc.y;
-        doc.rect(50, startY, 495, 20).fill('#4472C4');
-        doc.fillColor('#FFFFFF').font('Helvetica-Bold');
-        doc.text('S.No', 55, startY + 5, { width: 30 });
-        doc.text('Roll No', 85, startY + 5, { width: 60 });
-        doc.text('Name', 145, startY + 5, { width: 150 });
-        doc.text('Status', 295, startY + 5, { width: 60 });
-        doc.text('Time', 355, startY + 5, { width: 80 });
-        doc.text('Remarks', 435, startY + 5, { width: 100 });
-        
-        let currY = startY + 20;
-        let altRow = true;
-        let presentCount = 0;
-        let absentCount = 0;
-        let lateCount = 0;
-        
-        records.forEach((r, index) => {
-            if (currY > 700) {
-                doc.addPage();
-                currY = 50;
-            }
-
-            doc.fillColor(altRow ? '#F2F2F2' : '#FFFFFF');
-            doc.rect(50, currY, 495, 20).fill();
-            doc.fillColor('#000000').font('Helvetica');
-
-            let statusStr = 'Absent';
-            if (r.status === 'present' || (r.status === 'late' && r.teacherApproved === true)) {
-                statusStr = 'Present';
-                presentCount++;
-            } else if (r.status === 'late') {
-                statusStr = 'Late';
-                lateCount++;
-            } else {
-                absentCount++;
-            }
-
-            // Safely convert joinedAt — could be a Firestore Timestamp or ISO string
-            const joinedAtRaw = r.joinedAt;
-            let joinedDate = null;
-            if (joinedAtRaw) {
-                if (typeof joinedAtRaw.toDate === 'function') {
-                    joinedDate = joinedAtRaw.toDate();
-                } else if (typeof joinedAtRaw === 'string' || typeof joinedAtRaw === 'number') {
-                    joinedDate = new Date(joinedAtRaw);
-                }
-            }
-            const rTime = joinedDate && !isNaN(joinedDate.getTime()) ? joinedDate.toLocaleTimeString() : 'N/A';
-            const sNoStr = (index + 1).toString();
-            const rollStr = r.rollNumber || r.studentRollNumber || 'N/A';
-            const nameStr = r.studentName || 'N/A';
-
-            doc.text(sNoStr, 55, currY + 5, { width: 30 });
-            doc.text(rollStr, 85, currY + 5, { width: 60 });
-            doc.text(nameStr.length > 20 ? nameStr.substring(0, 20) + '...' : nameStr, 145, currY + 5, { width: 150 });
-            doc.text(statusStr, 295, currY + 5, { width: 60 });
-            doc.text(rTime, 355, currY + 5, { width: 80 });
-            doc.text(r.autoAbsent ? 'Auto Absent' : '', 435, currY + 5, { width: 100 });
-
-            currY += 20;
-            altRow = !altRow;
-        });
-
-        doc.moveDown();
-        doc.moveDown();
-        const boxY = doc.y;
-        if (boxY > 650) {
-            doc.addPage();
-        }
-        
-        const total = presentCount + lateCount + absentCount;
-        const pct = total > 0 ? ((presentCount / (session.totalStudents || total)) * 100).toFixed(2) : 0;
-        
-        doc.rect(345, doc.y, 200, 60).fillAndStroke('#D9D9D9', '#000000');
-        doc.fillColor('#000000').font('Helvetica-Bold');
-        doc.text(`Total: ${session.totalStudents || total}`, 355, doc.y + 10);
-        doc.text(`Present %: ${pct}%`, 355, doc.y + 20);
-        doc.text(`Absent: ${absentCount}`, 355, doc.y + 30);
-        doc.text(`Late: ${lateCount}`, 355, doc.y + 40);
-
-        doc.moveDown(4);
-
-        doc.font('Helvetica').fontSize(10);
-        doc.text('_____________________', 50, doc.y);
-        doc.text('Teacher Signature', 50, doc.y + 5);
-        
-        doc.text(`Generated on: ${new Date().toLocaleString()}`, 50, 750);
-
-        doc.end();
     } catch (error) {
         console.error('exportSessionPdf error:', error);
+        if (next) return next(error);
         return res.status(500).json({ success: false, code: 'SERVER_ERROR', error: 'Internal server error' });
     }
 };
