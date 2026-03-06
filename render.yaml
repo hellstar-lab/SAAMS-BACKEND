@@ -2,7 +2,6 @@ services:
   - type: web
     name: saam-backend
     runtime: node
-    branch: teacher-app
     buildCommand: npm install && node download-models.js
     startCommand: node index.js
     envVars:
