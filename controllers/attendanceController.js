@@ -630,9 +630,11 @@ export const getSessionAttendance = async (req, res, next) => {
             const teacherApproved = r.teacherApproved;
             if (status === 'present' || (status === 'late' && teacherApproved === true)) {
                 totalPresent++;
-            } else if (status === 'late' && teacherApproved === null) {
+            } else if (status === 'late' && teacherApproved !== false) {
+                // Late but not yet rejected = still categorised as late
                 totalLate++;
-            } else if (status === 'absent') {
+            } else {
+                // absent, or late+rejected
                 totalAbsent++;
             }
         });
@@ -651,7 +653,17 @@ export const getSessionAttendance = async (req, res, next) => {
                 method: session.method,
                 status: session.status,
                 startTime: session.startTime?.toDate?.()?.toISOString() || null,
-                endTime: session.endTime?.toDate?.()?.toISOString() || null
+                endTime: session.endTime?.toDate?.()?.toISOString() || null,
+                // Additional fields needed by the UI
+                roomNumber: session.roomNumber || null,
+                buildingName: session.buildingName || null,
+                teacherName: session.teacherName || null,
+                totalStudents: session.totalStudents || 0,
+                lateAfterMinutes: session.lateAfterMinutes || null,
+                autoAbsentMinutes: session.autoAbsentMinutes || null,
+                semester: session.semester || null,
+                section: session.section || null,
+                batch: session.batch || null
             },
             summary: {
                 totalPresent,
@@ -1283,16 +1295,16 @@ export const exportSessionPdf = async (req, res, next) => {
 
         const sessionDoc = await db.collection('sessions').doc(sessionId).get();
         if (!sessionDoc.exists) {
-            return res.status(404).json({ success: false, code: 'SESSION_NOT_FOUND', error: 'Session not found' });
+            return errorResponse(res, 'Session not found', 404, 'SESSION_NOT_FOUND');
         }
-        const session = sessionDoc.data();
+        const session = { id: sessionDoc.id, ...sessionDoc.data() };
 
         if (session.classId !== classId) {
-            return res.status(400).json({ success: false, code: 'CLASS_MISMATCH', error: 'Session does not belong to this class' });
+            return errorResponse(res, 'Session does not belong to this class', 400, 'CLASS_MISMATCH');
         }
 
         if (session.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
-            return res.status(403).json({ success: false, code: 'UNAUTHORIZED', error: 'You do not own this session' });
+            return errorResponse(res, 'Unauthorized access to session data', 403, 'UNAUTHORIZED');
         }
 
         const attSnap = await db.collection('attendance')
@@ -1375,7 +1387,17 @@ export const exportSessionPdf = async (req, res, next) => {
                 absentCount++;
             }
 
-            const rTime = r.joinedAt ? r.joinedAt.toDate().toLocaleTimeString() : 'N/A';
+            // Safely convert joinedAt — could be a Firestore Timestamp or ISO string
+            const joinedAtRaw = r.joinedAt;
+            let joinedDate = null;
+            if (joinedAtRaw) {
+                if (typeof joinedAtRaw.toDate === 'function') {
+                    joinedDate = joinedAtRaw.toDate();
+                } else if (typeof joinedAtRaw === 'string' || typeof joinedAtRaw === 'number') {
+                    joinedDate = new Date(joinedAtRaw);
+                }
+            }
+            const rTime = joinedDate && !isNaN(joinedDate.getTime()) ? joinedDate.toLocaleTimeString() : 'N/A';
             const sNoStr = (index + 1).toString();
             const rollStr = r.rollNumber || r.studentRollNumber || 'N/A';
             const nameStr = r.studentName || 'N/A';
