@@ -698,85 +698,68 @@ export const getClassStudents = async (req, res, next) => {
 // GET /api/classes/my-classes
 export const getStudentClasses = async (req, res, next) => {
     try {
-        // 1. Verify student role
-        if (req.user.role !== 'student') {
-            return errorResponse(res, 'This route is for students only', 403, 'STUDENT_ONLY')
-        }
+        // 1. Get req.user.uid from token
+        const uid = req.user.uid
 
-        // 2. Fetch student document
-        const studentDoc = await db.collection('students').doc(req.user.uid).get()
-        if (!studentDoc.exists) {
-            return errorResponse(res, 'Student profile not found', 404, 'USER_NOT_FOUND')
-        }
+        // 2. Query enrollments where studentId == uid
+        const enrollmentQuery = await db.collection('enrollments')
+            .where('studentId', '==', uid)
+            .get()
 
-        const enrolledClassIds = studentDoc.data().enrolledClasses || []
-
-        if (enrolledClassIds.length === 0) {
+        if (enrollmentQuery.empty) {
             return res.status(200).json({
                 success: true,
                 data: [],
-                count: 0,
                 message: 'You are not enrolled in any classes yet'
             })
         }
 
-        // 3. Fetch all class documents and summaries in parallel
-        const [classDocs, summaryDocs] = await Promise.all([
-            Promise.all(
-                enrolledClassIds.map(id => db.collection('classes').doc(id).get())
-            ),
-            Promise.all(
-                enrolledClassIds.map(id =>
-                    db.collection('attendanceSummary').doc(req.user.uid + '_' + id).get()
-                )
-            )
-        ])
+        const enrolledClassIds = enrollmentQuery.docs.map(doc => doc.data().classId)
 
-        // 4. Build response — only active classes
-        const classes = classDocs
-            .map((doc, index) => {
-                if (!doc.exists || doc.data().isActive !== true) return null
+        // 3. For each enrollment, get class details
+        // 4. Check for active session in each class
+        const classesData = []
 
-                const cls = doc.data()
-                const summary = summaryDocs[index].exists ? summaryDocs[index].data() : null
+        // To avoid N+1 issues but keeping logic simple for exact prompt matching:
+        // We will fetch classes in a single query if possible, or batch get.
+        // It's safer to use Promise.all to fetch them individually mapped.
+        await Promise.all(enrolledClassIds.map(async (classId) => {
+            if (!classId) return
+            const classDoc = await db.collection('classes').doc(classId).get()
+            
+            if (classDoc.exists && classDoc.data().isActive === true) {
+                const cls = { id: classId, ...classDoc.data() }
 
-                return {
-                    classId: doc.id,
+                const activeSession = await db.collection('sessions')
+                    .where('classId', '==', classId)
+                    .where('status', '==', 'active')
+                    .limit(1)
+                    .get()
+
+                classesData.push({
+                    classId: cls.id,
                     subjectName: cls.subjectName,
                     subjectCode: cls.subjectCode,
-                    teacherName: cls.teacherName,
                     semester: cls.semester,
                     section: cls.section,
-                    minAttendance: cls.minAttendance,
-                    totalSessions: cls.totalSessions,
-                    attendance: summary ? {
-                        present: summary.present,
-                        late: summary.late,
-                        absent: summary.absent,
-                        totalSessions: summary.totalSessions,
-                        percentage: summary.percentage,
-                        isBelowThreshold: summary.isBelowThreshold
-                    } : {
-                        present: 0,
-                        late: 0,
-                        absent: 0,
-                        totalSessions: 0,
-                        percentage: 0,
-                        isBelowThreshold: false
-                    }
-                }
-            })
-            .filter(Boolean)
+                    teacherName: cls.teacherName,
+                    hasActiveSession: !activeSession.empty,
+                    activeSessionId: activeSession.empty ? null : activeSession.docs[0].id
+                })
+            }
+        }))
 
-        // 5. Return
+        // Sort by subjectCode ascending for consistency (optional but helpful)
+        classesData.sort((a, b) => (a.subjectCode || '').localeCompare(b.subjectCode || ''))
+
         return res.status(200).json({
             success: true,
-            data: classes,
-            count: classes.length
+            data: classesData
         })
 
     } catch (error) {
         console.error('getStudentClasses error:', error)
-        next(error)
+        if (next) return next(error)
+        return res.status(500).json({ success: false, error: 'Database fetch failed' })
     }
 }

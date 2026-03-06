@@ -550,90 +550,162 @@ export const refreshQrCode = async (req, res, next) => {
     }
 }
 
-// ━━━ GET ACTIVE SESSION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// GET /api/sessions/active/:classId
+// ━━━ GET ACTIVE SESSION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+/**
+ * Retrieve active session details for a specific class
+ * GET /api/sessions/active/:classId
+ * 
+ * Production-ready implementation with:
+ * - Student enrollment verification
+ * - Consistent error formatting
+ * - Standardized response schema (including GPS fields)
+ * - Auto-termination check
+ */
 export const getActiveSession = async (req, res, next) => {
     try {
-        const { classId } = req.params
+        const { classId } = req.params;
+        const userId = req.user.uid;
+        const userRole = req.user.role; // e.g., 'student', 'teacher', 'hod', 'superAdmin'
 
-        // 1. Query for active session
-        const snap = await db.collection('sessions')
+        // STEP 1: Verify Class Existence
+        const classRef = db.collection('classes').doc(classId);
+        const classDoc = await classRef.get();
+
+        if (!classDoc.exists) {
+            return res.status(404).json({
+                success: false,
+                code: "CLASS_NOT_FOUND",
+                error: "Class not found"
+            });
+        }
+
+        // STEP 2: Verify Access Rights
+        if (userRole === 'student') {
+            // Check enrollment
+            const enrollmentQuery = await db.collection('enrollments')
+                .where('studentId', '==', userId)
+                .where('classId', '==', classId)
+                .limit(1)
+                .get();
+
+            if (enrollmentQuery.empty) {
+                return res.status(403).json({
+                    success: false,
+                    code: "NOT_ENROLLED",
+                    error: "You are not enrolled in this class"
+                });
+            }
+        } else if (userRole === 'teacher') {
+            const classData = classDoc.data();
+            if (classData.teacherId !== userId) {
+                return res.status(403).json({
+                    success: false,
+                    code: "UNAUTHORIZED",
+                    error: "You are not the teacher of this class"
+                });
+            }
+        }
+        // HODs and SuperAdmins bypass this check
+
+        // STEP 3: Query Active Session
+        const sessionsQuery = await db.collection('sessions')
             .where('classId', '==', classId)
             .where('status', '==', 'active')
             .limit(1)
-            .get()
+            .get();
 
-        // 2. None found
-        if (snap.empty) {
-            return res.status(200).json({
-                success: true,
-                data: null,
-                message: 'No active session'
-            })
+        // Standardized response for NO active session
+        if (sessionsQuery.empty) {
+            return res.status(404).json({
+                success: false,
+                code: "NO_ACTIVE_SESSION",
+                error: "No active session found"
+            });
         }
 
-        const sessionDoc = snap.docs[0]
-        const sessionData = { id: sessionDoc.id, ...sessionDoc.data() }
+        const sessionDoc = sessionsQuery.docs[0];
+        const session = sessionDoc.data();
+        const classData = classDoc.data();
 
-        // 3. Auto-end if expired (>3 hours)
-        if (isSessionExpired(sessionData.startTime, 180)) {
-            await db.collection('sessions').doc(sessionDoc.id).update({
+        // STEP 4: Auto-termination Check
+        const MILLISECONDS_PER_MINUTE = 60000;
+        const startTimeMillis = session.startTime.toMillis();
+        const currentTimeMillis = Date.now();
+        const minutesSinceStart = (currentTimeMillis - startTimeMillis) / MILLISECONDS_PER_MINUTE;
+        const maxDurationMinutes = session.autoAbsentMinutes || 120; // Default max 2 hours
+
+        if (minutesSinceStart > maxDurationMinutes) {
+            // Auto-end the session
+            await sessionDoc.ref.update({
                 status: 'ended',
-                endTime: FieldValue.serverTimestamp()
-            })
-            return res.status(200).json({
-                success: true,
-                data: null,
-                message: 'Session auto-ended due to timeout'
-            })
+                endTime: FieldValue.serverTimestamp(),
+                autoEnded: true
+            });
+
+            // Log the auto-termination
+            logAction(db, ACTIONS.SESSION_ENDED, 'system', ACTOR_ROLES.SYSTEM, sessionDoc.id, TARGET_TYPES.SESSION,
+                createDetails({ autoEnded: true, reason: 'Max duration exceeded' }), session.departmentId, req.ip
+            ).catch(console.error);
+
+            return res.status(404).json({
+                success: false,
+                code: "SESSION_EXPIRED",
+                error: "Session automatically ended due to timeout"
+            });
         }
 
-        // 4. Build response with all fields
-        const responseData = {
-            sessionId: sessionData.id,
-            classId: sessionData.classId,
-            teacherId: sessionData.teacherId,
-            teacherName: sessionData.teacherName || null,
-            subjectName: sessionData.subjectName || null,
-            subjectCode: sessionData.subjectCode || null,
-            method: sessionData.method,
-            status: sessionData.status,
-            faceRequired: sessionData.faceRequired || false,
-            lateAfterMinutes: sessionData.lateAfterMinutes || 10,
-            autoAbsentMinutes: sessionData.autoAbsentMinutes || 5,
-            totalStudents: sessionData.totalStudents || 0,
-            semester: sessionData.semester || null,
-            section: sessionData.section || null,
-            roomNumber: sessionData.roomNumber || null,
-            buildingName: sessionData.buildingName || null,
-            startTime: sessionData.startTime?.toDate?.()?.toISOString() || null
-        }
-
-        // Include method-specific fields
-        if (sessionData.method === 'qrcode') {
-            responseData.qrCode = sessionData.qrCode || null
-            responseData.qrRefreshInterval = sessionData.qrRefreshInterval || 30
-            responseData.qrLastRefreshed = sessionData.qrLastRefreshed?.toDate?.()?.toISOString() || null
-        } else if (sessionData.method === 'gps') {
-            responseData.teacherLat = sessionData.teacherLat || null
-            responseData.teacherLng = sessionData.teacherLng || null
-            responseData.radiusMeters = sessionData.radiusMeters || 50
-        } else if (sessionData.method === 'network') {
-            responseData.expectedSSID = sessionData.expectedSSID || null
-        } else if (sessionData.method === 'bluetooth') {
-            responseData.bleSessionCode = sessionData.bleSessionCode || null
-        }
+        // STEP 5: Format Standardized Response
+        // Crucial: Always include GPS fields, even if null, for strict schema compliance
+        const activeSessionResponse = {
+            id: sessionDoc.id,
+            sessionId: sessionDoc.id, // Included for symmetry
+            classId: session.classId,
+            teacherId: session.teacherId,
+            subjectName: session.subjectName,
+            subjectCode: session.subjectCode,
+            method: session.method, // 'qr', 'gps', 'face'
+            status: session.status,
+            startTime: session.startTime?.toDate?.()?.toISOString() || null,
+            totalStudents: session.totalStudents || classData.students?.length || 0,
+            
+            // Configuration parameters
+            lateAfterMinutes: session.lateAfterMinutes || 10,
+            autoAbsentMinutes: session.autoAbsentMinutes || 5,
+            
+            // Method-specific fields (guaranteed presence)
+            qrCode: session.qrCode || null,
+            qrRefreshInterval: session.qrRefreshInterval || null,
+            qrRefreshedAt: session.qrRefreshedAt?.toDate?.()?.toISOString() || null,
+            
+            // GPS Fields - Strictly required by frontend schema
+            teacherLat: session.teacherLat !== undefined ? session.teacherLat : null,
+            teacherLng: session.teacherLng !== undefined ? session.teacherLng : null,
+            radiusMeters: session.radiusMeters !== undefined ? session.radiusMeters : null,
+            
+            // Audit fields
+            departmentId: session.departmentId,
+            semester: session.semester,
+            section: session.section,
+            batch: session.batch,
+            academicYear: session.academicYear
+        };
 
         return res.status(200).json({
             success: true,
-            data: responseData
-        })
+            data: activeSessionResponse,
+            message: "Active session retrieved successfully"
+        });
 
     } catch (error) {
-        console.error('getActiveSession error:', error)
-        next(error)
+        console.error('getActiveSession error:', error);
+        if (next) return next(error);
+        return res.status(500).json({
+            success: false,
+            code: "SERVER_ERROR",
+            error: "Failed to fetch active session details"
+        });
     }
-}
+};
 
 // ━━━ GET SESSION BY ID ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // GET /api/sessions/:sessionId

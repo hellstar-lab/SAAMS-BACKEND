@@ -38,13 +38,18 @@ const validatePassword = (p) => p && p.length >= 6
 // POST /api/auth/register/student
 export const registerStudent = async (req, res, next) => {
     try {
-        const { name, email, password, rollNumber, phone, fcmToken, designation } = req.body
+        const { name, email, password, rollNumber, phone, semester, section, fcmToken, designation } = req.body
 
         // Validate required fields
-        const err = validateRequired(['name', 'email', 'password', 'rollNumber'], req.body)
+        const err = validateRequired(['name', 'email', 'password', 'rollNumber', 'semester', 'section'], req.body)
         if (err) return errorResponse(res, err, 400, 'VALIDATION_ERROR')
         if (!validateEmail(email)) return errorResponse(res, 'Invalid email address', 400, 'INVALID_EMAIL')
         if (!password || password.length < 6) return errorResponse(res, 'Password must be at least 6 characters', 400, 'WEAK_PASSWORD')
+
+        const semNum = parseInt(semester)
+        if (isNaN(semNum) || semNum <= 0) {
+            return errorResponse(res, 'Semester must be a positive integer', 400, 'INVALID_SEMESTER')
+        }
 
         // Create Firebase Auth user
         let newUser
@@ -72,8 +77,8 @@ export const registerStudent = async (req, res, next) => {
             rollNumber: rollNumber.trim(),
             departmentId: null,
             departmentName: null,
-            semester: null,
-            section: null,
+            semester: semNum,
+            section: section.trim(),
             batch: null,
             enrolledClasses: [],
             faceDescriptor: null,
