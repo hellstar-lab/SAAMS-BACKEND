@@ -1227,6 +1227,11 @@ export const getAttendanceReport = async (req, res, next) => {
 // ━━━ PROFESSIONAL SESSION EXCEL EXPORT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const exportSessionExcel = async (req, res, next) => {
     try {
+        // Prevent caching
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
         const { classId } = req.params;
         const { sessionId } = req.query;
         const uid = req.user.uid;
@@ -1313,6 +1318,11 @@ export const exportSessionExcel = async (req, res, next) => {
 // ━━━ PROFESSIONAL SESSION PDF EXPORT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const exportSessionPdf = async (req, res, next) => {
     try {
+        // Prevent caching
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
         const { classId } = req.params;
         const { sessionId } = req.query;
         const uid = req.user.uid;
