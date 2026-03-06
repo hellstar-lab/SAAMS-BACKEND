@@ -1290,8 +1290,15 @@ export const exportSessionExcel = async (req, res, next) => {
 
         const buffer = await generateSessionAttendanceExcel(session, records);
 
+        // Build a human-readable filename: Attendance_DataStructures_CS201_2026-03-06.xlsx
+        const sDate = session.startTime?.toDate ? session.startTime.toDate() : new Date(session.startTime);
+        const dateStr = !isNaN(sDate.getTime()) ? sDate.toISOString().split('T')[0] : 'report';
+        const subjectSlug = (session.subjectName || 'Session').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
+        const codeSlug = (session.subjectCode || '').replace(/[^a-zA-Z0-9]/g, '_');
+        const fileName = `Attendance_${subjectSlug}${codeSlug ? '_' + codeSlug : ''}_${dateStr}.xlsx`;
+
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename="session_${sessionId}.xlsx"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
         
         return res.send(buffer);
 
@@ -1372,8 +1379,15 @@ export const exportSessionPdf = async (req, res, next) => {
         // 6. Generate PDF using the robust utility
         const buffer = await generateSessionReport(session, records, classInfo);
 
+        // Build a human-readable filename: Attendance_DataStructures_CS201_2026-03-06.pdf
+        const sDate = session.startTime?.toDate ? session.startTime.toDate() : new Date(session.startTime);
+        const dateStr = !isNaN(sDate.getTime()) ? sDate.toISOString().split('T')[0] : 'report';
+        const subjectSlug = (session.subjectName || 'Session').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
+        const codeSlug = (session.subjectCode || '').replace(/[^a-zA-Z0-9]/g, '_');
+        const fileName = `Attendance_${subjectSlug}${codeSlug ? '_' + codeSlug : ''}_${dateStr}.pdf`;
+
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="session_${sessionId}.pdf"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
         return res.send(buffer);
 
     } catch (error) {
