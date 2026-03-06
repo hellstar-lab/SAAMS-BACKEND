@@ -793,7 +793,7 @@ export const getClassSessions = async (req, res, next) => {
             })
             .slice(0, Number(limit))
 
-        return successResponse(res, { sessions, total: sessions.length })
+        return successResponse(res, { data: sessions, total: sessions.length })
 
     } catch (error) {
         console.error('getClassSessions error:', error)
@@ -948,14 +948,25 @@ export const getMySessionHistory = async (req, res, next) => {
         if (classId) {
             query = query.where('classId', '==', classId);
         }
-        query = query.orderBy('startTime', 'desc').limit(100);
-
+        // Removed orderBy to avoid composite index requirement
+        
         const snap = await query.get();
         if (snap.empty) {
             return res.status(200).json({ success: true, data: [], count: 0 });
         }
 
-        const sessions = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        let sessions = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        
+        // Sort in-memory by startTime descending
+        sessions.sort((a, b) => {
+            const timeA = a.startTime?.toMillis ? a.startTime.toMillis() : new Date(a.startTime).getTime();
+            const timeB = b.startTime?.toMillis ? b.startTime.toMillis() : new Date(b.startTime).getTime();
+            return timeB - timeA;
+        });
+
+        // Limit to 100 for performance
+        sessions = sessions.slice(0, 100);
+
         const enrichedSessions = [];
 
         const sessionBatches = [];
