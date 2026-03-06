@@ -2,8 +2,8 @@ import { db, admin } from '../config/firebase.js';
 import { FieldValue } from 'firebase-admin/firestore';
 import { successResponse, errorResponse } from '../utils/responseHelper.js';
 import { isStudentLate } from '../utils/lateDetection.js';
-import { generateClassAttendanceExcel, generateDepartmentExcel, generateSessionAttendanceExcel } from '../utils/excelGenerator.js';
-import { generateAttendanceCertificate, generateSessionReport } from '../utils/pdfGenerator.js';
+import { generateClassAttendanceExcel, generateDepartmentExcel, generateSessionAttendanceExcel, generateSessionExcel } from '../utils/excelGenerator.js';
+import { generateAttendanceCertificate, generateSessionReport, generateSessionPDF } from '../utils/pdfGenerator.js';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 
@@ -1224,7 +1224,7 @@ export const getAttendanceReport = async (req, res, next) => {
 
 
 
-// NEW: exportSessionExcel
+// ━━━ PROFESSIONAL SESSION EXCEL EXPORT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const exportSessionExcel = async (req, res, next) => {
     try {
         const { classId } = req.params;
@@ -1240,66 +1240,68 @@ export const exportSessionExcel = async (req, res, next) => {
             return exportClassExcel(req, res, next);
         }
 
+        // ── 1. Fetch Session Data ──
         const sessionDoc = await db.collection('sessions').doc(sessionId).get();
         if (!sessionDoc.exists) {
             return errorResponse(res, 'Session not found', 404, 'SESSION_NOT_FOUND');
         }
-        const session = { id: sessionDoc.id, ...sessionDoc.data() };
+        const sessionData = { id: sessionDoc.id, ...sessionDoc.data() };
 
-        if (session.classId !== classId) {
+        if (sessionData.classId !== classId) {
             return errorResponse(res, 'Session does not belong to this class', 400, 'CLASS_MISMATCH');
         }
-
-        if (session.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
+        if (sessionData.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
             return errorResponse(res, 'Unauthorized access to session data', 403, 'UNAUTHORIZED');
         }
 
-        // 1. Fetch raw attendance records
+        // ── 2. Fetch Class Data ──
+        const classDocSnap = await db.collection('classes').doc(classId).get();
+        const classData = classDocSnap.exists ? classDocSnap.data() : {};
+
+        // ── 3. Fetch Teacher Data ──
+        const teacherDocSnap = await db.collection('teachers').doc(sessionData.teacherId).get();
+        const teacherData = teacherDocSnap.exists ? teacherDocSnap.data() : {};
+
+        // ── 4. Fetch Attendance Records ──
         const attSnap = await db.collection('attendance')
             .where('sessionId', '==', sessionId)
             .get();
         const rawRecords = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-        // 2. Collect unique studentIds to enrich from students collection
+        // ── 5. Batch-fetch student profiles for enrichment ──
         const studentIds = [...new Set(rawRecords.map(r => r.studentId).filter(Boolean))];
-
-        // 3. Batch-fetch student profiles (Firestore 'in' limit = 30)
         const studentMap = {};
         for (let i = 0; i < studentIds.length; i += 30) {
             const batch = studentIds.slice(i, i + 30);
             const studentsSnap = await db.collection('students').where(admin.firestore.FieldPath.documentId(), 'in', batch).get();
-            studentsSnap.docs.forEach(doc => {
-                studentMap[doc.id] = doc.data();
-            });
+            studentsSnap.docs.forEach(doc => { studentMap[doc.id] = doc.data(); });
         }
 
-        // 4. Enrich each attendance record with real student data
-        const records = rawRecords.map(r => {
-            const studentProfile = studentMap[r.studentId] || {};
+        // ── 6. Enrich records with real student data ──
+        const attendanceList = rawRecords.map(r => {
+            const sp = studentMap[r.studentId] || {};
             return {
                 ...r,
-                studentName: r.studentName || studentProfile.name || 'Unknown',
-                studentRollNumber: r.studentRollNumber || r.rollNumber || studentProfile.rollNumber || studentProfile.studentId || 'N/A',
-                rollNumber: r.rollNumber || r.studentRollNumber || studentProfile.rollNumber || studentProfile.studentId || 'N/A'
+                studentName: r.studentName || sp.name || 'Unknown',
+                studentRollNumber: r.studentRollNumber || r.rollNumber || sp.rollNumber || sp.studentId || 'N/A',
+                rollNumber: r.rollNumber || r.studentRollNumber || sp.rollNumber || sp.studentId || 'N/A'
             };
         }).sort((a, b) => {
-            const rollA = a.studentRollNumber || '';
-            const rollB = b.studentRollNumber || '';
-            return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
+            return (a.studentRollNumber || '').localeCompare(b.studentRollNumber || '', undefined, { numeric: true, sensitivity: 'base' });
         });
 
-        const buffer = await generateSessionAttendanceExcel(session, records);
+        // ── 7. Generate professional Excel ──
+        const buffer = await generateSessionExcel(sessionData, classData, teacherData, attendanceList);
 
-        // Build a human-readable filename: Attendance_DataStructures_CS201_2026-03-06.xlsx
-        const sDate = session.startTime?.toDate ? session.startTime.toDate() : new Date(session.startTime);
+        // ── 8. Human-readable filename ──
+        const sDate = sessionData.startTime?.toDate ? sessionData.startTime.toDate() : new Date(sessionData.startTime);
         const dateStr = !isNaN(sDate.getTime()) ? sDate.toISOString().split('T')[0] : 'report';
-        const subjectSlug = (session.subjectName || 'Session').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
-        const codeSlug = (session.subjectCode || '').replace(/[^a-zA-Z0-9]/g, '_');
+        const subjectSlug = (classData.subjectName || sessionData.subjectName || 'Session').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
+        const codeSlug = (classData.subjectCode || sessionData.subjectCode || '').replace(/[^a-zA-Z0-9]/g, '_');
         const fileName = `Attendance_${subjectSlug}${codeSlug ? '_' + codeSlug : ''}_${dateStr}.xlsx`;
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-        
         return res.send(buffer);
 
     } catch (error) {
@@ -1308,7 +1310,7 @@ export const exportSessionExcel = async (req, res, next) => {
     }
 };
 
-// NEW: exportSessionPdf
+// ━━━ PROFESSIONAL SESSION PDF EXPORT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const exportSessionPdf = async (req, res, next) => {
     try {
         const { classId } = req.params;
@@ -1324,66 +1326,64 @@ export const exportSessionPdf = async (req, res, next) => {
             return exportClassPdf(req, res, next);
         }
 
+        // ── 1. Fetch Session Data ──
         const sessionDoc = await db.collection('sessions').doc(sessionId).get();
         if (!sessionDoc.exists) {
             return errorResponse(res, 'Session not found', 404, 'SESSION_NOT_FOUND');
         }
-        const session = { id: sessionDoc.id, ...sessionDoc.data() };
+        const sessionData = { id: sessionDoc.id, ...sessionDoc.data() };
 
-        if (session.classId !== classId) {
+        if (sessionData.classId !== classId) {
             return errorResponse(res, 'Session does not belong to this class', 400, 'CLASS_MISMATCH');
         }
-
-        if (session.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
+        if (sessionData.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
             return errorResponse(res, 'Unauthorized access to session data', 403, 'UNAUTHORIZED');
         }
 
-        // 1. Fetch raw attendance records
+        // ── 2. Fetch Class Data ──
+        const classDocSnap = await db.collection('classes').doc(classId).get();
+        const classData = classDocSnap.exists ? classDocSnap.data() : {};
+
+        // ── 3. Fetch Teacher Data ──
+        const teacherDocSnap = await db.collection('teachers').doc(sessionData.teacherId).get();
+        const teacherData = teacherDocSnap.exists ? teacherDocSnap.data() : {};
+
+        // ── 4. Fetch Attendance Records ──
         const attSnap = await db.collection('attendance')
             .where('sessionId', '==', sessionId)
             .get();
         const rawRecords = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-        // 2. Collect unique studentIds to enrich from students collection
+        // ── 5. Batch-fetch student profiles for enrichment ──
         const studentIds = [...new Set(rawRecords.map(r => r.studentId).filter(Boolean))];
-
-        // 3. Batch-fetch student profiles (Firestore 'in' limit = 30)
         const studentMap = {};
         for (let i = 0; i < studentIds.length; i += 30) {
             const batch = studentIds.slice(i, i + 30);
             const studentsSnap = await db.collection('students').where(admin.firestore.FieldPath.documentId(), 'in', batch).get();
-            studentsSnap.docs.forEach(doc => {
-                studentMap[doc.id] = doc.data();
-            });
+            studentsSnap.docs.forEach(doc => { studentMap[doc.id] = doc.data(); });
         }
 
-        // 4. Enrich each attendance record with real student data
-        const records = rawRecords.map(r => {
-            const studentProfile = studentMap[r.studentId] || {};
+        // ── 6. Enrich records with real student data ──
+        const attendanceList = rawRecords.map(r => {
+            const sp = studentMap[r.studentId] || {};
             return {
                 ...r,
-                studentName: r.studentName || studentProfile.name || 'Unknown',
-                studentRollNumber: r.studentRollNumber || r.rollNumber || studentProfile.rollNumber || studentProfile.studentId || 'N/A',
-                rollNumber: r.rollNumber || r.studentRollNumber || studentProfile.rollNumber || studentProfile.studentId || 'N/A'
+                studentName: r.studentName || sp.name || 'Unknown',
+                studentRollNumber: r.studentRollNumber || r.rollNumber || sp.rollNumber || sp.studentId || 'N/A',
+                rollNumber: r.rollNumber || r.studentRollNumber || sp.rollNumber || sp.studentId || 'N/A'
             };
         }).sort((a, b) => {
-            const rollA = a.studentRollNumber || '';
-            const rollB = b.studentRollNumber || '';
-            return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
+            return (a.studentRollNumber || '').localeCompare(b.studentRollNumber || '', undefined, { numeric: true, sensitivity: 'base' });
         });
 
-        // 5. Fetch class info for the PDF context
-        const classDoc = await db.collection('classes').doc(classId).get();
-        const classInfo = classDoc.exists ? { id: classDoc.id, ...classDoc.data() } : {};
+        // ── 7. Generate professional PDF ──
+        const buffer = await generateSessionPDF(sessionData, classData, teacherData, attendanceList);
 
-        // 6. Generate PDF using the robust utility
-        const buffer = await generateSessionReport(session, records, classInfo);
-
-        // Build a human-readable filename: Attendance_DataStructures_CS201_2026-03-06.pdf
-        const sDate = session.startTime?.toDate ? session.startTime.toDate() : new Date(session.startTime);
+        // ── 8. Human-readable filename ──
+        const sDate = sessionData.startTime?.toDate ? sessionData.startTime.toDate() : new Date(sessionData.startTime);
         const dateStr = !isNaN(sDate.getTime()) ? sDate.toISOString().split('T')[0] : 'report';
-        const subjectSlug = (session.subjectName || 'Session').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
-        const codeSlug = (session.subjectCode || '').replace(/[^a-zA-Z0-9]/g, '_');
+        const subjectSlug = (classData.subjectName || sessionData.subjectName || 'Session').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
+        const codeSlug = (classData.subjectCode || sessionData.subjectCode || '').replace(/[^a-zA-Z0-9]/g, '_');
         const fileName = `Attendance_${subjectSlug}${codeSlug ? '_' + codeSlug : ''}_${dateStr}.pdf`;
 
         res.setHeader('Content-Type', 'application/pdf');
