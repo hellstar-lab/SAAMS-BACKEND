@@ -1,5 +1,5 @@
 import express from 'express'
-import { verifyToken } from '../middleware/authMiddleware.js'
+import { verifyToken, authorize } from '../middleware/authMiddleware.js'
 import {
     startSession,
     endSession,
@@ -9,7 +9,7 @@ import {
     updateQRCode,
     getSessionStats,
     refreshQrCode,
-    getTeacherSessionHistory
+    getMySessionHistory
 } from '../controllers/sessionController.js'
 
 const router = express.Router()
@@ -18,16 +18,17 @@ const router = express.Router()
 router.use(verifyToken)
 
 // ─── Static/keyword routes FIRST (before :sessionId param routes) ──────────────
-router.post('/start', startSession)
-router.get('/my-sessions', getTeacherSessionHistory)
-router.get('/active/:classId', getActiveSession)
-router.get('/class/:classId', getClassSessions)
+router.post('/start', authorize(['teacher', 'hod', 'superAdmin']), startSession)
+router.get('/my-sessions', authorize(['teacher', 'hod']), getMySessionHistory)
+router.get('/active/:classId', authorize(['teacher', 'hod', 'student', 'superAdmin']), getActiveSession)
+router.get('/class/:classId', authorize(['teacher', 'hod', 'superAdmin']), getClassSessions)
 
 // ─── Parameterized routes ──────────────────────────────────────────────────────
-router.post('/:sessionId/end', endSession)
-router.get('/:sessionId', getSessionById)
-router.put('/:sessionId/qr', updateQRCode)
-router.patch('/:sessionId/refresh-qr', refreshQrCode)
-router.get('/:sessionId/stats', getSessionStats)
+router.post('/:sessionId/end', authorize(['teacher', 'hod', 'superAdmin']), endSession)
+router.get('/:sessionId', authorize(['teacher', 'hod', 'student', 'superAdmin']), getSessionById)
+router.put('/:sessionId/qr', authorize(['teacher', 'hod']), updateQRCode)
+router.patch('/:sessionId/refresh-qr', authorize(['teacher', 'hod']), refreshQrCode)
+router.get('/:sessionId/stats', authorize(['teacher', 'hod', 'superAdmin']), getSessionStats)
+
 
 export default router

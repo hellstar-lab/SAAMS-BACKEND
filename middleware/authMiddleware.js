@@ -158,3 +158,16 @@ export const verifyFirebaseToken = async (req, res, next) => {
         return res.status(401).json({ success: false, error: 'Invalid token', code: 'INVALID_TOKEN' })
     }
 }
+
+export const authorize = (roles = []) => {
+    return (req, res, next) => {
+        if (!req.user || !roles.includes(req.user.role)) {
+            return res.status(403).json({
+                success: false,
+                code: 'FORBIDDEN',
+                error: 'You do not have permission to perform this action'
+            })
+        }
+        next()
+    }
+}

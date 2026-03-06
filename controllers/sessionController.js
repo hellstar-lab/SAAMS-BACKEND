@@ -930,64 +930,101 @@ export const getSessionStats = async (req, res, next) => {
 
 // ━━━ GET TEACHER SESSION HISTORY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // GET /api/sessions/my-sessions
-export const getTeacherSessionHistory = async (req, res, next) => {
+export const getMySessionHistory = async (req, res, next) => {
     try {
-        // 1. Verify teacher role
-        if (req.user.role !== 'teacher' && req.user.role !== 'hod') {
+        const uid = req.user.uid;
+        const role = req.user.role;
+        const { classId } = req.query;
+
+        if (role !== 'teacher' && role !== 'hod') {
             return res.status(403).json({
                 success: false,
-                error: 'Only teachers can view their session history',
-                code: 'FORBIDDEN'
-            })
+                code: 'FORBIDDEN',
+                error: 'Only teachers or HODs can view session history'
+            });
         }
 
-        const { status, limit } = req.query
+        let query = db.collection('sessions').where('teacherId', '==', uid);
+        if (classId) {
+            query = query.where('classId', '==', classId);
+        }
+        query = query.orderBy('startTime', 'desc').limit(100);
 
-        // 2. Build query (no orderBy to avoid composite index requirement)
-        let query = db.collection('sessions')
-            .where('teacherId', '==', req.user.uid)
-
-        if (status) {
-            query = query.where('status', '==', status)
+        const snap = await query.get();
+        if (snap.empty) {
+            return res.status(200).json({ success: true, data: [], count: 0 });
         }
 
-        const snap = await query.get()
+        const sessions = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const enrichedSessions = [];
 
-        // 3. Map, sort in-memory, and limit
-        const sessions = snap.docs
-            .map(doc => {
-                const data = doc.data()
+        const sessionBatches = [];
+        for (let i = 0; i < sessions.length; i += 10) {
+            sessionBatches.push(sessions.slice(i, i + 10));
+        }
+
+        for (const batch of sessionBatches) {
+            const batchPromises = batch.map(async (session) => {
+                const attSnap = await db.collection('attendance')
+                    .where('sessionId', '==', session.id)
+                    .get();
+                
+                let present = 0;
+                let late = 0;
+                let absent = 0;
+                
+                attSnap.docs.forEach(doc => {
+                    const status = doc.data().status;
+                    const teacherApproved = doc.data().teacherApproved;
+                    if (status === 'present' || (status === 'late' && teacherApproved === true)) {
+                        present++;
+                    } else if (status === 'late' && teacherApproved === null) {
+                        late++;
+                    } else if (status === 'absent') {
+                        absent++;
+                    }
+                });
+
+                const totalEnrolled = session.totalStudents || 0;
+                const attendancePercentage = totalEnrolled > 0 ? Number(((present / totalEnrolled) * 100).toFixed(2)) : 0;
+
                 return {
-                    sessionId: doc.id,
-                    subjectName: data.subjectName || null,
-                    subjectCode: data.subjectCode || null,
-                    method: data.method,
-                    status: data.status,
-                    semester: data.semester || null,
-                    section: data.section || null,
-                    totalStudents: data.totalStudents || 0,
-                    startTime: data.startTime?.toDate?.()?.toISOString() || null,
-                    endTime: data.endTime?.toDate?.()?.toISOString() || null,
-                    roomNumber: data.roomNumber || null,
-                    buildingName: data.buildingName || null
-                }
-            })
-            .sort((a, b) => {
-                if (!a.startTime) return 1
-                if (!b.startTime) return -1
-                return new Date(b.startTime) - new Date(a.startTime)
-            })
-            .slice(0, parseInt(limit) || 20)
+                    sessionId: session.id,
+                    classId: session.classId,
+                    subjectName: session.subjectName,
+                    subjectCode: session.subjectCode,
+                    method: session.method,
+                    status: session.status,
+                    startTime: session.startTime?.toDate?.()?.toISOString() || null,
+                    endTime: session.endTime?.toDate?.()?.toISOString() || null,
+                    totalStudents: session.totalStudents || 0,
+                    roomNumber: session.roomNumber || null,
+                    buildingName: session.buildingName || null,
+                    summary: {
+                        totalPresent: present,
+                        totalLate: late,
+                        totalAbsent: absent,
+                        totalEnrolled: totalEnrolled,
+                        attendancePercentage: attendancePercentage
+                    }
+                };
+            });
+            
+            const results = await Promise.all(batchPromises);
+            enrichedSessions.push(...results);
+        }
 
-        // 4. Return response
         return res.status(200).json({
             success: true,
-            data: sessions,
-            count: sessions.length
-        })
+            data: enrichedSessions,
+            count: enrichedSessions.length
+        });
 
     } catch (error) {
-        console.error('getTeacherSessionHistory error:', error)
-        next(error)
+        console.error('getMySessionHistory error:', error);
+        if (next) return next(error);
+        return res.status(500).json({ success: false, code: 'SERVER_ERROR', error: 'Database compilation metrics breakdown fault error evaluation domain' });
     }
 }
+
+

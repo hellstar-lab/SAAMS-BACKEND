@@ -4,6 +4,8 @@ import { successResponse, errorResponse } from '../utils/responseHelper.js';
 import { isStudentLate } from '../utils/lateDetection.js';
 import { generateClassAttendanceExcel, generateDepartmentExcel } from '../utils/excelGenerator.js';
 import { generateAttendanceCertificate, generateSessionReport } from '../utils/pdfGenerator.js';
+import ExcelJS from 'exceljs';
+import PDFDocument from 'pdfkit';
 
 import { logAction, createDetails, ACTIONS, ACTOR_ROLES, TARGET_TYPES } from '../utils/auditLogger.js';
 import { notifyStudentLate, notifyLowAttendance, notifyAttendanceDecision, notifyFraudDetected } from '../utils/notificationService.js';
@@ -589,66 +591,86 @@ export const getSessionAttendance = async (req, res, next) => {
     try {
         const { sessionId } = req.params;
         const uid = req.user.uid;
+        const role = req.user.role;
 
         const sessionDoc = await db.collection('sessions').doc(sessionId).get();
-        if (!sessionDoc.exists) return res.status(404).json({ success: false, error: 'Invalid bounding session limits.', code: 'NOT_FOUND' });
+        if (!sessionDoc.exists) {
+            return res.status(404).json({ success: false, code: 'SESSION_NOT_FOUND', error: 'Session not found' });
+        }
+        const session = { id: sessionDoc.id, ...sessionDoc.data() };
 
-        const session = sessionDoc.data();
-
-        if (session.teacherId !== uid) {
-            const classDoc = await db.collection('classes').doc(session.classId).get();
-            if (!classDoc.data()?.students?.includes(uid)) {
-                return res.status(403).json({ success: false, error: 'Permission invalid cross-boundary domain blocks.', code: 'UNAUTHORIZED' });
-            }
+        if (session.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
+            return res.status(403).json({ success: false, code: 'UNAUTHORIZED', error: 'You do not own this session' });
         }
 
         const snap = await db.collection('attendance')
             .where('sessionId', '==', sessionId)
-            .orderBy('joinedAt', 'asc')
             .get();
 
-        const records = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const data = snap.docs.map(doc => {
+            const d = doc.data();
+            return {
+                ...d,
+                id: doc.id,
+                joinedAt: d.joinedAt?.toDate?.()?.toISOString() || null,
+                markedAt: d.markedAt?.toDate?.()?.toISOString() || null
+            };
+        }).sort((a, b) => {
+            const rollA = a.rollNumber || a.studentRollNumber || '';
+            const rollB = b.rollNumber || b.studentRollNumber || '';
+            return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
+        });
 
-        const present = [];
-        const late = [];
-        const absent = [];
-        const approved = [];
+        let totalPresent = 0;
+        let totalLate = 0;
+        let totalAbsent = 0;
 
-        for (const r of records) {
-            if (r.status === 'present') {
-                if (r.teacherApproved === true && r.approvedAt) {
-                    approved.push(r);
-                } else {
-                    present.push(r);
-                }
-            } else if (r.status === 'late' && r.teacherApproved == null) {
-                late.push(r);
-            } else if (r.status === 'absent') {
-                absent.push(r);
+        data.forEach(r => {
+            const status = r.status;
+            const teacherApproved = r.teacherApproved;
+            if (status === 'present' || (status === 'late' && teacherApproved === true)) {
+                totalPresent++;
+            } else if (status === 'late' && teacherApproved === null) {
+                totalLate++;
+            } else if (status === 'absent') {
+                totalAbsent++;
             }
-        }
+        });
+
+        const totalEnrolled = session.totalStudents || 0;
+        const attendancePercentage = totalEnrolled > 0 ? Number(((totalPresent / totalEnrolled) * 100).toFixed(2)) : 0;
 
         return res.status(200).json({
             success: true,
-            data: {
-                present, late, absent, approved,
-                counts: {
-                    present: present.length + approved.length,
-                    late: late.length,
-                    absent: absent.length,
-                    total: records.length
-                }
-            }
+            data: data,
+            sessionInfo: {
+                sessionId: session.id,
+                classId: session.classId,
+                subjectName: session.subjectName,
+                subjectCode: session.subjectCode,
+                method: session.method,
+                status: session.status,
+                startTime: session.startTime?.toDate?.()?.toISOString() || null,
+                endTime: session.endTime?.toDate?.()?.toISOString() || null
+            },
+            summary: {
+                totalPresent,
+                totalLate,
+                totalAbsent,
+                totalEnrolled,
+                attendancePercentage
+            },
+            count: data.length
         });
     } catch (error) {
         console.error('getSessionAttendance error:', error);
         if (next) return next(error);
-        return res.status(500).json({ success: false, error: 'Failure evaluating attendance lists internal domain fault', code: 'SERVER_ERROR' });
+        return res.status(500).json({ success: false, code: 'SERVER_ERROR', error: 'Internal server error' });
     }
 };
 
 // ━━━ EXPORT ATTENDANCE EXCEL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-export const exportAttendanceExcel = async (req, res, next) => {
+export const exportClassExcel = async (req, res, next) => {
     try {
         const { classId } = req.params;
         const { startDate, endDate } = req.query;
@@ -677,9 +699,13 @@ export const exportAttendanceExcel = async (req, res, next) => {
         let attendanceRecords = [];
         if (sessions.length > 0) {
             const sessionIds = sessions.map(s => s.id);
+            const batchPromises = [];
             for (let i = 0; i < sessionIds.length; i += 30) {
                 const batch = sessionIds.slice(i, i + 30);
-                const aSnap = await db.collection('attendance').where('sessionId', 'in', batch).get();
+                batchPromises.push(db.collection('attendance').where('sessionId', 'in', batch).get());
+            }
+            const snapResults = await Promise.all(batchPromises);
+            for (const aSnap of snapResults) {
                 attendanceRecords.push(...aSnap.docs.map(d => ({ id: d.id, ...d.data() })));
             }
         }
@@ -709,7 +735,7 @@ export const exportAttendanceExcel = async (req, res, next) => {
 };
 
 // ━━━ EXPORT ATTENDANCE PDF ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-export const exportAttendancePDF = async (req, res, next) => {
+export const exportClassPdf = async (req, res, next) => {
     try {
         const { classId } = req.params;
         const { startDate, endDate } = req.query;
@@ -738,9 +764,13 @@ export const exportAttendancePDF = async (req, res, next) => {
         let attendanceRecords = [];
         if (sessions.length > 0) {
             const sessionIds = sessions.map(s => s.id);
+            const batchPromises = [];
             for (let i = 0; i < sessionIds.length; i += 30) {
                 const batch = sessionIds.slice(i, i + 30);
-                const aSnap = await db.collection('attendance').where('sessionId', 'in', batch).get();
+                batchPromises.push(db.collection('attendance').where('sessionId', 'in', batch).get());
+            }
+            const snapResults = await Promise.all(batchPromises);
+            for (const aSnap of snapResults) {
                 attendanceRecords.push(...aSnap.docs.map(d => ({ id: d.id, ...d.data() })));
             }
         }
@@ -1179,3 +1209,278 @@ export const getAttendanceReport = async (req, res, next) => {
         return res.status(500).json({ success: false, error: 'Database compilation metrics breakdown fault error evaluation domain', code: 'SERVER_ERROR' });
     }
 };
+
+
+
+// NEW: exportSessionExcel
+export const exportSessionExcel = async (req, res, next) => {
+    try {
+        const { classId } = req.params;
+        const { sessionId } = req.query;
+        const uid = req.user.uid;
+        const role = req.user.role;
+
+        if (sessionId && typeof sessionId !== 'string') {
+            return res.status(400).json({ success: false, code: 'INVALID_INPUT', error: 'Invalid sessionId format expected string' });
+        }
+
+        if (!sessionId) {
+            return exportClassExcel(req, res, next);
+        }
+
+        const sessionDoc = await db.collection('sessions').doc(sessionId).get();
+        if (!sessionDoc.exists) {
+            return res.status(404).json({ success: false, code: 'SESSION_NOT_FOUND', error: 'Session not found' });
+        }
+        const session = sessionDoc.data();
+
+        if (session.classId !== classId) {
+            return res.status(400).json({ success: false, code: 'CLASS_MISMATCH', error: 'Session does not belong to this class' });
+        }
+
+        if (session.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
+            return res.status(403).json({ success: false, code: 'UNAUTHORIZED', error: 'You do not own this session' });
+        }
+
+        const attSnap = await db.collection('attendance')
+            .where('sessionId', '==', sessionId)
+            .get();
+        
+        const records = attSnap.docs.map(doc => doc.data()).sort((a, b) => {
+            const rollA = a.rollNumber || a.studentRollNumber || '';
+            const rollB = b.rollNumber || b.studentRollNumber || '';
+            return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
+        });
+
+        const workbook = new ExcelJS.Workbook();
+        const sheet = workbook.addWorksheet('Session Report');
+
+        sheet.addRow([`Attendance Report — ${session.subjectName || 'Subject'}`]);
+        sheet.addRow([`Date: ${session.startTime ? session.startTime.toDate().toISOString().split('T')[0] : 'N/A'}`]);
+        sheet.addRow([`Method: ${session.method}`]);
+        sheet.addRow([`Room: ${session.roomNumber || 'N/A'}`]);
+        sheet.addRow([]);
+
+        const headerRow = sheet.addRow(['Roll No', 'Student Name', 'Status', 'Time Joined', 'Minutes Late']);
+        headerRow.font = { bold: true };
+
+        sheet.getColumn(1).width = 15;
+        sheet.getColumn(2).width = 25;
+        sheet.getColumn(3).width = 15;
+        sheet.getColumn(4).width = 25;
+        sheet.getColumn(5).width = 15;
+
+        let totalPresent = 0, totalLate = 0, totalAbsent = 0;
+
+        records.forEach(r => {
+            let statusText = r.status || 'unknown';
+            let color = 'FFFFFFFF';
+            let minutesLate = '';
+
+            if (r.status === 'present' || (r.status === 'late' && r.teacherApproved === true)) {
+                totalPresent++;
+                statusText = 'Present';
+                color = 'FFC6EFCE'; 
+            } else if (r.status === 'late') {
+                totalLate++;
+                statusText = 'Late';
+                color = 'FFFFEB9C'; 
+                if (r.joinedAt && session.startTime) {
+                    const mins = Math.floor((r.joinedAt.toMillis() - session.startTime.toMillis()) / 60000);
+                    minutesLate = mins > 0 ? mins : '';
+                }
+            } else if (r.status === 'absent') {
+                totalAbsent++;
+                statusText = 'Absent';
+                color = 'FFFFC7CE'; 
+            }
+
+            const timeJoined = r.joinedAt ? r.joinedAt.toDate().toLocaleString() : 'N/A';
+            const rollNo = r.rollNumber || r.studentRollNumber || 'N/A';
+            const name = r.studentName || 'N/A';
+
+            const row = sheet.addRow([rollNo, name, statusText, timeJoined, minutesLate]);
+
+            row.getCell(3).fill = {
+                type: 'pattern',
+                pattern: 'solid',
+                fgColor: { argb: color }
+            };
+            row.getCell(1).alignment = { horizontal: 'center' };
+            row.getCell(3).alignment = { horizontal: 'center' };
+        });
+
+        sheet.addRow([]);
+        const totalEnrolled = session.totalStudents || 0;
+        const pct = totalEnrolled > 0 ? ((totalPresent / totalEnrolled) * 100).toFixed(2) : 0;
+        sheet.addRow(['Summary', `Present: ${totalPresent}`, `Late: ${totalLate}`, `Absent: ${totalAbsent}`, `Attendance %: ${pct}%`]);
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="session_${sessionId}.xlsx"`);
+
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (error) {
+        console.error('exportSessionExcel error:', error);
+        return res.status(500).json({ success: false, code: 'SERVER_ERROR', error: 'Internal server error' });
+    }
+};
+
+// NEW: exportSessionPdf
+export const exportSessionPdf = async (req, res, next) => {
+    try {
+        const { classId } = req.params;
+        const { sessionId } = req.query;
+        const uid = req.user.uid;
+        const role = req.user.role;
+
+        if (sessionId && typeof sessionId !== 'string') {
+            return res.status(400).json({ success: false, code: 'INVALID_INPUT', error: 'Invalid sessionId format expected string' });
+        }
+
+        if (!sessionId) {
+            return exportClassPdf(req, res, next);
+        }
+
+        const sessionDoc = await db.collection('sessions').doc(sessionId).get();
+        if (!sessionDoc.exists) {
+            return res.status(404).json({ success: false, code: 'SESSION_NOT_FOUND', error: 'Session not found' });
+        }
+        const session = sessionDoc.data();
+
+        if (session.classId !== classId) {
+            return res.status(400).json({ success: false, code: 'CLASS_MISMATCH', error: 'Session does not belong to this class' });
+        }
+
+        if (session.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
+            return res.status(403).json({ success: false, code: 'UNAUTHORIZED', error: 'You do not own this session' });
+        }
+
+        const attSnap = await db.collection('attendance')
+            .where('sessionId', '==', sessionId)
+            .get();
+        
+        const records = attSnap.docs.map(doc => doc.data()).sort((a, b) => {
+            const rollA = a.rollNumber || a.studentRollNumber || '';
+            const rollB = b.rollNumber || b.studentRollNumber || '';
+            return rollA.localeCompare(rollB, undefined, { numeric: true, sensitivity: 'base' });
+        });
+
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="session_${sessionId}.pdf"`);
+        doc.pipe(res);
+
+        // Header Section
+        doc.font('Helvetica-Bold').fontSize(16).text('Your College Name', { align: 'center' });
+        doc.font('Helvetica').fontSize(12).text('SAAMS - Smart Attendance System', { align: 'center' });
+        doc.font('Helvetica-Bold').fontSize(14).text('Attendance Report', { align: 'center' });
+        doc.moveDown();
+        doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
+        doc.moveDown();
+
+        const formattedDate = session.startTime ? session.startTime.toDate().toLocaleDateString() : 'N/A';
+        const stTime = session.startTime ? session.startTime.toDate().toLocaleTimeString() : 'N/A';
+        const enTime = session.endTime ? session.endTime.toDate().toLocaleTimeString() : 'Ongoing';
+        
+        let duration = 'N/A';
+        if (session.startTime && session.endTime) {
+            const diff = Math.floor((session.endTime.toMillis() - session.startTime.toMillis()) / 60000);
+            duration = `${diff} mins`;
+        }
+
+        doc.font('Helvetica').fontSize(10);
+        doc.text(`Subject: ${session.subjectName || 'N/A'} (${session.subjectCode || 'N/A'})`);
+        doc.text(`Date: ${formattedDate}`);
+        doc.text(`Time: ${stTime} to ${enTime}`);
+        doc.text(`Duration: ${duration}`);
+        doc.text(`Method: ${session.method || 'N/A'}`);
+        doc.text(`Room: ${session.roomNumber || 'N/A'} ${session.buildingName || ''}`);
+        doc.text(`Teacher: ${session.teacherName || 'N/A'}`);
+        doc.moveDown();
+
+        const startY = doc.y;
+        doc.rect(50, startY, 495, 20).fill('#4472C4');
+        doc.fillColor('#FFFFFF').font('Helvetica-Bold');
+        doc.text('S.No', 55, startY + 5, { width: 30 });
+        doc.text('Roll No', 85, startY + 5, { width: 60 });
+        doc.text('Name', 145, startY + 5, { width: 150 });
+        doc.text('Status', 295, startY + 5, { width: 60 });
+        doc.text('Time', 355, startY + 5, { width: 80 });
+        doc.text('Remarks', 435, startY + 5, { width: 100 });
+        
+        let currY = startY + 20;
+        let altRow = true;
+        let presentCount = 0;
+        let absentCount = 0;
+        let lateCount = 0;
+        
+        records.forEach((r, index) => {
+            if (currY > 700) {
+                doc.addPage();
+                currY = 50;
+            }
+
+            doc.fillColor(altRow ? '#F2F2F2' : '#FFFFFF');
+            doc.rect(50, currY, 495, 20).fill();
+            doc.fillColor('#000000').font('Helvetica');
+
+            let statusStr = 'Absent';
+            if (r.status === 'present' || (r.status === 'late' && r.teacherApproved === true)) {
+                statusStr = 'Present';
+                presentCount++;
+            } else if (r.status === 'late') {
+                statusStr = 'Late';
+                lateCount++;
+            } else {
+                absentCount++;
+            }
+
+            const rTime = r.joinedAt ? r.joinedAt.toDate().toLocaleTimeString() : 'N/A';
+            const sNoStr = (index + 1).toString();
+            const rollStr = r.rollNumber || r.studentRollNumber || 'N/A';
+            const nameStr = r.studentName || 'N/A';
+
+            doc.text(sNoStr, 55, currY + 5, { width: 30 });
+            doc.text(rollStr, 85, currY + 5, { width: 60 });
+            doc.text(nameStr.length > 20 ? nameStr.substring(0, 20) + '...' : nameStr, 145, currY + 5, { width: 150 });
+            doc.text(statusStr, 295, currY + 5, { width: 60 });
+            doc.text(rTime, 355, currY + 5, { width: 80 });
+            doc.text(r.autoAbsent ? 'Auto Absent' : '', 435, currY + 5, { width: 100 });
+
+            currY += 20;
+            altRow = !altRow;
+        });
+
+        doc.moveDown();
+        doc.moveDown();
+        const boxY = doc.y;
+        if (boxY > 650) {
+            doc.addPage();
+        }
+        
+        const total = presentCount + lateCount + absentCount;
+        const pct = total > 0 ? ((presentCount / (session.totalStudents || total)) * 100).toFixed(2) : 0;
+        
+        doc.rect(345, doc.y, 200, 60).fillAndStroke('#D9D9D9', '#000000');
+        doc.fillColor('#000000').font('Helvetica-Bold');
+        doc.text(`Total: ${session.totalStudents || total}`, 355, doc.y + 10);
+        doc.text(`Present %: ${pct}%`, 355, doc.y + 20);
+        doc.text(`Absent: ${absentCount}`, 355, doc.y + 30);
+        doc.text(`Late: ${lateCount}`, 355, doc.y + 40);
+
+        doc.moveDown(4);
+
+        doc.font('Helvetica').fontSize(10);
+        doc.text('_____________________', 50, doc.y);
+        doc.text('Teacher Signature', 50, doc.y + 5);
+        
+        doc.text(`Generated on: ${new Date().toLocaleString()}`, 50, 750);
+
+        doc.end();
+    } catch (error) {
+        console.error('exportSessionPdf error:', error);
+        return res.status(500).json({ success: false, code: 'SERVER_ERROR', error: 'Internal server error' });
+    }
+};
+
