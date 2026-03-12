@@ -297,9 +297,15 @@ export async function generateClassAttendanceExcel(
             let absentCount = 0;
 
             sessionRecords.forEach(r => {
-                if (r.status === 'present') presentCount++;
-                else if (r.status === 'late') lateCount++;
-                else if (r.status === 'absent') absentCount++;
+                const status = r.status;
+                const teacherApproved = r.teacherApproved;
+                if (status === 'present' || (status === 'late' && teacherApproved === true)) {
+                    presentCount++;
+                } else if (status === 'late' && teacherApproved !== false) {
+                    lateCount++;
+                } else {
+                    absentCount++;
+                }
             });
 
             const sDate = session.startTime?.toDate ? session.startTime.toDate() : new Date(session.startTime);
