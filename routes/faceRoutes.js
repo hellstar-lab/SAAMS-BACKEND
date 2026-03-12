@@ -4,8 +4,7 @@ import { enrollFace, verifyFace } from '../controllers/faceController.js'
 
 const router = express.Router()
 
-// Routes are currently public as requested
-// router.use(verifyToken)
+router.use(verifyToken)
 
 // POST /api/face/enroll  — store a student's face descriptor
 router.post('/enroll', enrollFace)

@@ -10,6 +10,7 @@ node_modules/
 *.json
 !package.json
 !package-lock.json
+firebase-adminsdk-*.json
 
 # Test files (optional — comment out to include in repo)
 # test-auth.js

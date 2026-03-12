@@ -401,6 +401,16 @@ export const addStudentsToClass = async (req, res, next) => {
                     enrolledClasses: FieldValue.arrayUnion(classId),
                     updatedAt: FieldValue.serverTimestamp()
                 })
+
+                const enrollmentRef = db.collection('enrollments').doc(`${student.uid}_${classId}`)
+                batch.set(enrollmentRef, {
+                    studentId: student.uid,
+                    classId,
+                    enrolledAt: FieldValue.serverTimestamp(),
+                    status: 'active',
+                    teacherId: classData.teacherId,
+                    subjectName: classData.subjectName,
+                })
             }
 
             await batch.commit()
@@ -474,6 +484,9 @@ export const removeStudentFromClass = async (req, res, next) => {
             enrolledClasses: FieldValue.arrayRemove(classId),
             updatedAt: FieldValue.serverTimestamp()
         })
+
+        const enrollmentRef = db.collection('enrollments').doc(`${studentId}_${classId}`)
+        batch.delete(enrollmentRef)
 
         await batch.commit()
 
@@ -690,6 +703,130 @@ export const getClassStudents = async (req, res, next) => {
 
     } catch (error) {
         console.error('getClassStudents error:', error)
+        next(error)
+    }
+}
+
+// ━━━ IMPORT STUDENTS TO CLASS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// POST /api/classes/import-students
+/**
+ * Import students into a class by matching on their studentId field in the users collection.
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
+ * @returns {Promise<void>}
+ */
+export const importStudents = async (req, res, next) => {
+    try {
+        const { classId, students } = req.body
+
+        // 1. Verify teacher or hod role
+        if (req.user.role !== 'teacher' && req.user.role !== 'hod') {
+            return errorResponse(res, 'Only teachers or HODs can import students', 403, 'TEACHER_ONLY')
+        }
+
+        // 2. Validate input
+        if (!classId || typeof classId !== 'string') {
+            return errorResponse(res, 'classId is required', 400, 'VALIDATION_ERROR')
+        }
+        if (!Array.isArray(students) || students.length === 0) {
+            return errorResponse(res, 'students must be a non-empty array', 400, 'EMPTY_LIST')
+        }
+        const hasInvalidFormat = students.some(
+            s => !s || typeof s.name !== 'string' || typeof s.studentId !== 'string' || typeof s.email !== 'string'
+        )
+        if (hasInvalidFormat) {
+            return errorResponse(res, 'Each student must have name, studentId, and email fields', 400, 'INVALID_FORMAT')
+        }
+
+        // 3. Fetch class document and verify ownership
+        const { classData, error } = await fetchAndVerifyOwnership(classId, req.user.uid)
+        if (error) return errorResponse(res, error.message, error.status, error.code)
+
+        // 4. Verify class is active
+        if (!classData.isActive) {
+            return errorResponse(res, 'Cannot import students into an archived class', 400, 'CLASS_ARCHIVED')
+        }
+
+        // 5. Look up each student in the users collection by studentId field (parallel)
+        const importedStudents = []
+        const notFound = []
+
+        await Promise.all(students.map(async (student) => {
+            const snap = await db.collection('users')
+                .where('studentId', '==', student.studentId)
+                .where('role', '==', 'student')
+                .limit(1)
+                .get()
+
+            if (snap.empty) {
+                notFound.push({ studentId: student.studentId, name: student.name })
+                return
+            }
+
+            const uid = snap.docs[0].id
+            if (classData.students?.includes(uid)) return // already enrolled — skip silently
+
+            importedStudents.push({ uid, studentId: student.studentId, name: student.name })
+        }))
+
+        // 6. Batch write all updates atomically
+        if (importedStudents.length > 0) {
+            const batch = db.batch()
+            const classRef = db.collection('classes').doc(classId)
+
+            for (const student of importedStudents) {
+                batch.update(classRef, {
+                    students: FieldValue.arrayUnion(student.uid),
+                    updatedAt: FieldValue.serverTimestamp()
+                })
+
+                const studentRef = db.collection('students').doc(student.uid)
+                batch.update(studentRef, {
+                    enrolledClasses: FieldValue.arrayUnion(classId),
+                    updatedAt: FieldValue.serverTimestamp()
+                })
+
+                const enrollmentRef = db.collection('enrollments').doc(`${student.uid}_${classId}`)
+                batch.set(enrollmentRef, {
+                    studentId: student.uid,
+                    classId,
+                    enrolledAt: FieldValue.serverTimestamp(),
+                    status: 'active',
+                    teacherId: classData.teacherId,
+                    subjectName: classData.subjectName,
+                })
+            }
+
+            await batch.commit()
+        }
+
+        // 7. Audit log (fire and forget)
+        logAction(
+            db,
+            ACTIONS.STUDENT_ADDED,
+            req.user.uid,
+            getActorRole(req.user.role),
+            classId,
+            TARGET_TYPES.CLASS,
+            createDetails({
+                importedCount: importedStudents.length,
+                notFoundCount: notFound.length,
+                studentIds: importedStudents.map(s => s.studentId)
+            }),
+            classData.departmentId,
+            req.ip
+        )
+
+        // 8. Return
+        return successResponse(res, {
+            imported: importedStudents.length,
+            notFound,
+            message: `${importedStudents.length} student(s) imported, ${notFound.length} not found`
+        })
+
+    } catch (error) {
+        console.error('importStudents error:', error)
         next(error)
     }
 }

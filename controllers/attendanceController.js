@@ -62,7 +62,8 @@ const buildStudentSummary = (records, totalSessions) => {
     return map;
 };
 
-// ━━━ MARK ATTENDANCE (GPS) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━ MARK ATTENDANCE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 class AttendanceError extends Error {
     constructor(code, message, data = {}, statusCode = 400) {
         super(message);
@@ -72,83 +73,142 @@ class AttendanceError extends Error {
     }
 }
 
+// ─── Method Validators (private) ─────────────────────────────────────────────
+
 /**
- * Mark attendance using GPS location verification
+ * @param {Object} session - Firestore session data
+ * @param {Object} body - Request body
+ * @returns {{ valid: boolean, code?: string, error?: string, statusCode?: number, extraFields?: Object }}
+ */
+const validateQRMethod = (session, body) => {
+    const { scannedQR } = body;
+    if (!scannedQR || typeof scannedQR !== 'string') {
+        return { valid: false, code: 'QR_REQUIRED', error: 'scannedQR is required' };
+    }
+    if (scannedQR !== session.qrCode) {
+        return { valid: false, code: 'QR_INVALID', error: 'Scanned QR code does not match session' };
+    }
+    return { valid: true, extraFields: { qrCodeUsed: scannedQR } };
+};
+
+/**
+ * @param {Object} session - Firestore session data
+ * @param {Object} body - Request body
+ * @returns {{ valid: boolean, code?: string, error?: string, statusCode?: number, extraFields?: Object }}
+ */
+const validateGPSMethod = (session, body) => {
+    if (body.studentLat === undefined || body.studentLng === undefined) {
+        return { valid: false, code: 'GPS_REQUIRED', error: 'studentLat and studentLng are required' };
+    }
+    const lat = Number(body.studentLat);
+    const lng = Number(body.studentLng);
+    if (isNaN(lat) || lat < -90 || lat > 90) {
+        return { valid: false, code: 'INVALID_LATITUDE', error: 'Latitude must be a valid number between -90 and 90' };
+    }
+    if (isNaN(lng) || lng < -180 || lng > 180) {
+        return { valid: false, code: 'INVALID_LONGITUDE', error: 'Longitude must be a valid number between -180 and 180' };
+    }
+    const { teacherLat, teacherLng, radiusMeters = 100 } = session;
+    if (teacherLat == null || teacherLng == null) {
+        return { valid: false, code: 'SESSION_COORDINATES_MISSING', error: 'Session location not configured properly', statusCode: 500 };
+    }
+    const distance = haversineMeters(teacherLat, teacherLng, lat, lng);
+    if (distance > radiusMeters) {
+        return {
+            valid: false, code: 'OUT_OF_RANGE', error: 'You are too far from the classroom',
+            extraFields: { distance: Math.round(distance), radiusMeters, studentLat: lat, studentLng: lng, teacherLat, teacherLng }
+        };
+    }
+    return {
+        valid: true,
+        extraFields: { distance: Math.round(distance), studentLat: lat, studentLng: lng, teacherLat, teacherLng, withinRadius: true }
+    };
+};
+
+/**
+ * @param {Object} session - Firestore session data
+ * @param {Object} body - Request body
+ * @returns {{ valid: boolean, code?: string, error?: string, statusCode?: number, extraFields?: Object }}
+ */
+const validateNetworkMethod = (session, body) => {
+    const { studentSSID } = body;
+    if (!studentSSID || typeof studentSSID !== 'string') {
+        return { valid: false, code: 'SSID_REQUIRED', error: 'studentSSID is required' };
+    }
+    const { expectedSSID } = session;
+    if (!expectedSSID) {
+        return { valid: false, code: 'SESSION_SSID_MISSING', error: 'Session does not have an expected SSID configured', statusCode: 500 };
+    }
+    if (studentSSID.toLowerCase() !== expectedSSID.toLowerCase()) {
+        return {
+            valid: false, code: 'NETWORK_MISMATCH', error: 'Connected network does not match the classroom network',
+            extraFields: { expectedSSID, studentSSID }
+        };
+    }
+    return { valid: true, extraFields: { networkSSID: studentSSID } };
+};
+
+/**
+ * @param {Object} session - Firestore session data
+ * @param {Object} body - Request body
+ * @returns {{ valid: boolean, code?: string, error?: string, statusCode?: number, extraFields?: Object }}
+ */
+const validateBluetoothMethod = (session, body) => {
+    const { deviceId, rssi } = body;
+    if (!deviceId || typeof deviceId !== 'string') {
+        return { valid: false, code: 'DEVICE_ID_REQUIRED', error: 'deviceId is required for Bluetooth attendance' };
+    }
+    return { valid: true, extraFields: { bluetoothDeviceId: deviceId, rssi: typeof rssi === 'number' ? rssi : null } };
+};
+
+const VALID_METHODS = ['gps', 'qrcode', 'network', 'bluetooth'];
+
+const METHOD_VALIDATORS = {
+    gps: validateGPSMethod,
+    qrcode: validateQRMethod,
+    network: validateNetworkMethod,
+    bluetooth: validateBluetoothMethod,
+};
+
+/**
+ * Mark attendance for a student using the specified method
  * POST /api/attendance/mark
- * 
- * Production-ready implementation with:
- * - Pre-transaction validation (lightweight checks)
- * - Transaction-based atomic read-write (prevents race conditions)
- * - Comprehensive input validation
- * - Precise Haversine distance calculation
- * - Proper status determination (present/late)
- * - Complete attendance document creation
+ * Supported methods: gps, qrcode, network, bluetooth
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
+ * @returns {Promise<void>}
  */
 export const markAttendance = async (req, res, next) => {
     try {
-        // STEP 1: Authentication Check (Req already verified via middleware)
+        // STEP 1: Authentication (token already verified by middleware)
         const studentId = req.user.uid;
         const studentName = req.user.name || 'Unknown';
         const rollNumber = req.user.rollNumber || null;
 
-        // STEP 2: Input Validation (Fail-fast approach - no DB calls)
-        const { sessionId, method, studentLat, studentLng } = req.body;
+        // STEP 2: Fail-fast input validation (no DB calls)
+        const { sessionId, method } = req.body;
 
-        // Validate sessionId
-        if (!sessionId || typeof sessionId !== 'string' || sessionId.trim() === "") {
+        if (!sessionId || typeof sessionId !== 'string' || sessionId.trim() === '') {
+            return res.status(400).json({ success: false, code: 'SESSION_ID_REQUIRED', error: 'sessionId is required' });
+        }
+
+        if (!VALID_METHODS.includes(method)) {
             return res.status(400).json({
                 success: false,
-                code: "SESSION_ID_REQUIRED",
-                error: "sessionId is required and cannot be empty"
+                code: 'INVALID_METHOD',
+                error: `method must be one of: ${VALID_METHODS.join(', ')}`
             });
         }
 
-        // Validate method
-        if (method !== 'gps') {
-            return res.status(400).json({
-                success: false,
-                code: "INVALID_METHOD",
-                error: "Only GPS method is supported for this endpoint"
-            });
-        }
-
-        // Validate GPS coordinates presence
-        if (studentLat === undefined || studentLng === undefined) {
-            return res.status(400).json({
-                success: false,
-                code: "GPS_REQUIRED",
-                error: "studentLat and studentLng are required for GPS attendance"
-            });
-        }
-
-        // Parse and validate latitude
-        const lat = Number(studentLat);
-        if (isNaN(lat) || lat < -90 || lat > 90) {
-            return res.status(400).json({
-                success: false,
-                code: "INVALID_LATITUDE",
-                error: "Latitude must be a valid number between -90 and 90"
-            });
-        }
-
-        // Parse and validate longitude
-        const lng = Number(studentLng);
-        if (isNaN(lng) || lng < -180 || lng > 180) {
-            return res.status(400).json({
-                success: false,
-                code: "INVALID_LONGITUDE",
-                error: "Longitude must be a valid number between -180 and 180"
-            });
-        }
-
-        // STEP 3-8: Atomic Transaction Execution
+        // STEP 3: Atomic transaction (fetch → enroll check → duplicate check → validate → write)
         let attendanceResult = null;
 
         await db.runTransaction(async (transaction) => {
-            // STEP 3: Session Verification (within transaction)
+            // Fetch and validate session
             const sessionRef = db.collection('sessions').doc(sessionId);
             const sessionDoc = await transaction.get(sessionRef);
-            
+
             if (!sessionDoc.exists) {
                 throw new AttendanceError('SESSION_NOT_FOUND', 'Session does not exist', {}, 404);
             }
@@ -156,169 +216,102 @@ export const markAttendance = async (req, res, next) => {
             const session = sessionDoc.data();
 
             if (session.status !== 'active') {
-                throw new AttendanceError('SESSION_NOT_ACTIVE', 'Session is not currently active', 
+                throw new AttendanceError('SESSION_NOT_ACTIVE', 'Session is not currently active',
                     { currentStatus: session.status }, 400);
             }
 
-            // Validate session supports GPS
-            if (session.method !== 'gps') {
-                throw new AttendanceError('INVALID_SESSION_METHOD', 'This session does not support GPS attendance', 
+            if (session.method !== method) {
+                throw new AttendanceError('METHOD_MISMATCH',
+                    `Session uses ${session.method} attendance, not ${method}`,
                     { sessionMethod: session.method }, 400);
             }
 
-            // STEP 4: Enrollment Verification (Optimized - uses class.students array)
+            // Enrollment check
             const classRef = db.collection('classes').doc(session.classId);
             const classDoc = await transaction.get(classRef);
-            
+
             if (!classDoc.exists) {
                 throw new AttendanceError('CLASS_NOT_FOUND', 'Class not found', {}, 404);
             }
-            
-            const classData = classDoc.data();
-            const isEnrolled = classData.students && classData.students.includes(studentId);
-            
-            if (!isEnrolled) {
+
+            if (!classDoc.data().students?.includes(studentId)) {
                 throw new AttendanceError('NOT_ENROLLED', 'You are not enrolled in this class', {}, 403);
             }
 
-            // STEP 5: Duplicate Attendance Check (Transaction-safe)
-            // Use deterministic document ID: {sessionId}_{studentId}
+            // Duplicate check (deterministic doc ID prevents race conditions)
             const attendanceDocId = `${sessionId}_${studentId}`;
-            const existingAttendanceRef = db.collection('attendance').doc(attendanceDocId);
-            const existingAttendanceDoc = await transaction.get(existingAttendanceRef);
+            const existingRef = db.collection('attendance').doc(attendanceDocId);
+            const existingDoc = await transaction.get(existingRef);
 
-            if (existingAttendanceDoc.exists) {
-                const existingData = existingAttendanceDoc.data();
-                throw new AttendanceError('ALREADY_MARKED', 'Attendance already marked for this session', 
-                    { attendanceId: attendanceDocId, status: existingData.status }, 409);
+            if (existingDoc.exists) {
+                throw new AttendanceError('ALREADY_MARKED', 'Attendance already marked for this session',
+                    { attendanceId: attendanceDocId, status: existingDoc.data().status }, 409);
             }
 
-            // STEP 6: GPS Distance Calculation (Haversine Formula)
-            const EARTH_RADIUS_METERS = 6371000;
-            const teacherLat = session.teacherLat;
-            const teacherLng = session.teacherLng;
-            const radiusMeters = session.radiusMeters || 100;
-
-            // Validate session coordinates
-            if (teacherLat === undefined || teacherLng === undefined || 
-                teacherLat === null || teacherLng === null) {
-                console.error("Session missing coordinates:", session);
-                throw new AttendanceError('SESSION_COORDINATES_MISSING', 
-                    'Session location not configured properly', {}, 500);
+            // Method-specific validation
+            const validation = METHOD_VALIDATORS[method](session, req.body);
+            if (!validation.valid) {
+                throw new AttendanceError(
+                    validation.code, validation.error,
+                    validation.extraFields || {}, validation.statusCode || 400
+                );
             }
 
-            // Precise Haversine calculation
-            const toRadians = (degrees) => degrees * (Math.PI / 180);
-            const dLat = toRadians(lat - teacherLat);
-            const dLng = toRadians(lng - teacherLng);
-            const teacherLatRad = toRadians(teacherLat);
-            const studentLatRad = toRadians(lat);
+            // Determine present / late
+            const MILLIS_PER_MINUTE = 60000;
+            const minutesSinceStart = (Date.now() - session.startTime.toMillis()) / MILLIS_PER_MINUTE;
+            const isLate = minutesSinceStart > (session.lateAfterMinutes || 10);
+            const status = isLate ? 'late' : 'present';
+            const teacherApproved = isLate ? null : true;
 
-            const a = 
-                Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                Math.cos(teacherLatRad) * Math.cos(studentLatRad) *
-                Math.sin(dLng / 2) * Math.sin(dLng / 2);
-
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            const distance = EARTH_RADIUS_METERS * c;
-
-            // Check if within allowed radius
-            if (distance > radiusMeters) {
-                throw new AttendanceError('OUT_OF_RANGE', 'You are too far from the classroom', 
-                    {
-                        distance: Math.round(distance),
-                        radiusMeters: radiusMeters,
-                        studentLat: lat,
-                        studentLng: lng,
-                        teacherLat: teacherLat,
-                        teacherLng: teacherLng
-                    }, 400);
-            }
-
-            // STEP 7: Determine Attendance Status
-            const MILLISECONDS_PER_MINUTE = 60000;
-            const startTimeMillis = session.startTime.toMillis();
-            const currentTimeMillis = Date.now();
-            const minutesSinceStart = (currentTimeMillis - startTimeMillis) / MILLISECONDS_PER_MINUTE;
-
-            let status, teacherApproved;
-            if (minutesSinceStart <= (session.lateAfterMinutes || 10)) {
-                status = 'present';
-                teacherApproved = true;
-            } else {
-                status = 'late';
-                teacherApproved = null; // NULL for pending approval, NOT false
-            }
-
-            // STEP 8: Atomic Write Operation (within transaction)
+            // Build and write attendance document
             const now = FieldValue.serverTimestamp();
-            
             const attendanceData = {
                 attendanceId: attendanceDocId,
-                sessionId: sessionId,
+                sessionId,
                 classId: session.classId,
-                studentId: studentId,
-                studentName: studentName,
-                rollNumber: rollNumber,
+                studentId,
+                studentName,
+                rollNumber,
                 teacherId: session.teacherId,
-                status: status,
-                method: 'gps',
-                distance: Math.round(distance),
-                studentLat: lat,
-                studentLng: lng,
-                teacherLat: session.teacherLat,
-                teacherLng: session.teacherLng,
-                withinRadius: true,
-                teacherApproved: teacherApproved,
+                status,
+                method,
+                faceVerified: false,
                 joinedAt: now,
                 markedAt: now,
+                teacherApproved,
                 isSuspicious: false,
-                autoAbsent: false
+                autoAbsent: false,
+                ...(validation.extraFields || {})
             };
 
-            transaction.set(existingAttendanceRef, attendanceData);
+            transaction.set(existingRef, attendanceData);
 
-            // Store result for response
             attendanceResult = {
                 attendanceId: attendanceDocId,
-                status: status,
-                method: 'gps',
-                distance: Math.round(distance),
-                radiusMeters: radiusMeters,
-                withinRadius: true,
+                status,
+                method,
                 markedAt: new Date().toISOString(),
-                message: status === 'present' 
-                    ? 'Attendance marked successfully'
-                    : 'Marked as late — awaiting teacher approval'
+                ...(validation.extraFields || {}),
+                message: isLate ? 'Marked as late — awaiting teacher approval' : 'Attendance marked successfully'
             };
         });
 
-        // STEP 9: Success Response (outside transaction)
         return res.status(200).json({
             success: true,
-            data: attendanceResult,
-            message: attendanceResult.message
+            status: attendanceResult.status,
+            attendance: attendanceResult
         });
 
     } catch (error) {
         console.error('markAttendance error:', error);
-        
-        // Handle specific AttendanceError instances
+
         if (error instanceof AttendanceError) {
-            const response = {
-                success: false,
-                code: error.code,
-                error: error.message
-            };
-            
-            if (Object.keys(error.data).length > 0) {
-                response.data = error.data;
-            }
-            
+            const response = { success: false, code: error.code, error: error.message };
+            if (Object.keys(error.data).length > 0) response.data = error.data;
             return res.status(error.statusCode || 400).json(response);
         }
 
-        // Handle Firestore transaction errors
         if (error.code === 10 || error.code === 'ABORTED' || error.message?.includes('Transaction')) {
             return res.status(409).json({
                 success: false,
@@ -327,15 +320,15 @@ export const markAttendance = async (req, res, next) => {
             });
         }
 
-        // Generic error handling
         if (next) return next(error);
         return res.status(500).json({
             success: false,
-            code: "ATTENDANCE_SAVE_FAILED",
-            error: "Failed to process attendance request"
+            code: 'ATTENDANCE_SAVE_FAILED',
+            error: 'Failed to process attendance request'
         });
     }
 };
+
 
 // ━━━ APPROVE LATE ATTENDANCE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const approveLateAttendance = async (req, res, next) => {

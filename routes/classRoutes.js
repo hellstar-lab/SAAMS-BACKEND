@@ -8,7 +8,8 @@ import {
     removeStudentFromClass,
     archiveClass,
     getClassStudents,
-    getStudentClasses
+    getStudentClasses,
+    importStudents
 } from '../controllers/classController.js'
 
 const router = express.Router()
@@ -18,6 +19,7 @@ router.use(verifyToken)
 
 // ─── Static routes MUST come before /:classId ──────────────────────────────────
 router.post('/', createClass)
+router.post('/import-students', importStudents)    // BEFORE /:classId
 router.get('/my-classes', getStudentClasses)       // BEFORE /:classId
 router.get('/', getMyClasses)
 
