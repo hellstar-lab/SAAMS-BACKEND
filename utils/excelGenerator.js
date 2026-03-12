@@ -906,11 +906,26 @@ export async function generateSessionExcel(sessionData, classData, teacherData, 
     summaryHeader.height = 22;
 
     // ────── Calculate stats ──────
+    let totalPresent = 0;
+    let totalLate = 0;
+    let totalAbsent = 0;
+
+    attendanceList.forEach(r => {
+        const status = r.status;
+        const teacherApproved = r.teacherApproved;
+        if (status === 'present' || (status === 'late' && teacherApproved === true)) {
+            totalPresent++;
+        } else if (status === 'late' && teacherApproved !== false) {
+            // Late but not yet rejected = still categorised as late
+            totalLate++;
+        } else {
+            // absent, or late+rejected
+            totalAbsent++;
+        }
+    });
+
     const totalStudents = sessionData.totalStudents || attendanceList.length || 0;
-    const presentCount = attendanceList.filter(d => d.status === 'present' || (d.status === 'late' && d.teacherApproved === true)).length;
-    const lateCount = attendanceList.filter(d => d.status === 'late' && d.teacherApproved === null).length;
-    const absentCount = attendanceList.filter(d => d.status === 'absent').length;
-    const percentage = totalStudents > 0 ? ((presentCount / totalStudents) * 100).toFixed(1) : '0.0';
+    const percentage = totalStudents > 0 ? ((totalPresent / totalStudents) * 100).toFixed(1) : '0.0';
 
     // ────── SUMMARY BOXES (2 rows for the boxes) ──────
     const boxRow1Num = summaryHeader.number + 1;
@@ -932,9 +947,9 @@ export async function generateSessionExcel(sessionData, classData, teacherData, 
 
     const boxConfigs = [
         { col: 'A', label: 'TOTAL STUDENTS', value: totalStudents.toString(), bg: 'FF1565C0' },
-        { col: 'C', label: 'PRESENT', value: `${presentCount} (${percentage}%)`, bg: 'FF2E7D32' },
-        { col: 'E', label: 'ABSENT', value: absentCount.toString(), bg: 'FFC62828' },
-        { col: 'G', label: 'LATE / PENDING', value: lateCount.toString(), bg: 'FFE65100' }
+        { col: 'C', label: 'PRESENT', value: `${totalPresent} (${percentage}%)`, bg: 'FF2E7D32' },
+        { col: 'E', label: 'ABSENT', value: totalAbsent.toString(), bg: 'FFC62828' },
+        { col: 'G', label: 'LATE / PENDING', value: totalLate.toString(), bg: 'FFE65100' }
     ];
 
     boxConfigs.forEach(box => {
