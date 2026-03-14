@@ -63,7 +63,8 @@ export const enrollFace = async (req, res) => {
         // 4. Store the descriptor as a plain array in Firestore
         await studentRef.update({
             faceDescriptor: Array.from(descriptor),
-            faceEnrolledAt: new Date().toISOString()
+            faceEnrolledAt: new Date().toISOString(),
+            faceRegistered: true
         })
 
         return successResponse(res, { message: 'Face enrolled successfully' })
