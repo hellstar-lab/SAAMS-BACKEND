@@ -37,8 +37,7 @@ router.post('/mark', authorize(['teacher', 'hod', 'student', 'superAdmin']), mar
 router.post('/manual-approve', authorize(['teacher', 'hod', 'superAdmin']), manualApprove)
 router.get('/student/:studentId', authorize(['teacher', 'hod', 'student', 'superAdmin']), getStudentAttendance)
 router.get('/report/:classId', authorize(['teacher', 'hod', 'superAdmin']), getAttendanceReport)
-router.get('/export/class/:classId', authorize(['teacher', 'hod', 'superAdmin']), exportClassExcel)
-router.get('/export/class/:classId/pdf', authorize(['teacher', 'hod', 'superAdmin']), exportClassPdf)
+
 router.get('/certificate/:studentId', authorize(['teacher', 'hod', 'student', 'superAdmin']), exportStudentCertificate)
 router.get('/export/department/:departmentId', authorize(['hod', 'superAdmin']), exportDepartmentExcel)
 router.put('/:attendanceId/status', authorize(['teacher', 'hod', 'superAdmin']), updateAttendanceStatus)
@@ -48,8 +47,8 @@ router.post('/auto-absent/:sessionId', authorize(['teacher', 'hod', 'superAdmin'
 router.post('/end-session', authorize(['teacher', 'hod', 'superAdmin']), endSessionAndMarkAbsent)
 
 // NEW ROUTES (Re-mapping for God-Mode compliance)
-router.get('/session/:sessionId', authorize(['teacher', 'hod']), getSessionAttendance)
-router.get('/export/class/:classId', authorize(['teacher', 'hod']), exportLimiter, exportSessionExcel)
-router.get('/export/class/:classId/pdf', authorize(['teacher', 'hod']), exportLimiter, exportSessionPdf)
+router.get('/session/:sessionId', authorize(['teacher', 'hod', 'superAdmin']), getSessionAttendance)
+router.get('/export/class/:classId', authorize(['teacher', 'hod', 'superAdmin']), exportLimiter, exportSessionExcel)
+router.get('/export/class/:classId/pdf', authorize(['teacher', 'hod', 'superAdmin']), exportLimiter, exportSessionPdf)
 
 export default router

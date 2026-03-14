@@ -201,7 +201,7 @@ export async function generateClassAttendanceExcel(
     if (!summaries || summaries.length === 0) {
         ws1.addRow(['No data available']);
     } else {
-        const sortedSummaries = [...summaries].sort((a, b) => (a.studentRollNumber || '').localeCompare(b.studentRollNumber || ''));
+        const sortedSummaries = [...summaries].sort((a, b) => (a.studentRollNumber || a.rollNumber || '').localeCompare(b.studentRollNumber || b.rollNumber || ''));
         
         let totalPresentSum = 0;
         let belowThresholdCount = 0;
@@ -209,7 +209,7 @@ export async function generateClassAttendanceExcel(
         sortedSummaries.forEach((summary, index) => {
             const rowData = [
                 index + 1,
-                summary.studentRollNumber,
+                summary.studentRollNumber || summary.rollNumber || 'N/A',
                 summary.studentName,
                 summary.present,
                 summary.late,
@@ -431,7 +431,7 @@ export async function generateClassAttendanceExcel(
                 index + 1,
                 formatDate(record.joinedAt),
                 formatTime(record.joinedAt),
-                record.studentRollNumber,
+                record.studentRollNumber || record.rollNumber || 'N/A',
                 record.studentName,
                 capStatus,
                 formatMethod(record.method),
@@ -547,10 +547,10 @@ export async function generateDepartmentExcel(
             c.border = { top: { style: 'thin', color: { argb: COLORS.borderColor } }, bottom: { style: 'thin', color: { argb: COLORS.borderColor } } };
         });
 
-        subjData.records.sort((a,b) => (a.studentRollNumber || '').localeCompare(b.studentRollNumber || ''));
+        subjData.records.sort((a,b) => (a.studentRollNumber || a.rollNumber || '').localeCompare(b.studentRollNumber || b.rollNumber || ''));
         subjData.records.forEach((rec, idx) => {
             const row = ws1.addRow([
-                rec.studentRollNumber,
+                rec.studentRollNumber || rec.rollNumber || 'N/A',
                 rec.studentName,
                 rec.semester,
                 rec.section,
@@ -606,7 +606,7 @@ export async function generateDepartmentExcel(
     let atRiskCount = 0;
     if (allSummaries) {
         const atRisk = allSummaries.filter(s => s.isBelowThreshold);
-        atRisk.sort((a,b) => (a.studentRollNumber || '').localeCompare(b.studentRollNumber || ''));
+        atRisk.sort((a,b) => (a.studentRollNumber || a.rollNumber || '').localeCompare(b.studentRollNumber || b.rollNumber || ''));
 
         atRisk.forEach(rec => {
             const minAttr = rec.minAttendance || 75; // fallback
@@ -614,7 +614,7 @@ export async function generateDepartmentExcel(
             const sfStr = `-${shortfall.toFixed(1)}%`;
             
             const row = ws2.addRow([
-                rec.studentRollNumber,
+                rec.studentRollNumber || rec.rollNumber || 'N/A',
                 rec.studentName,
                 `${rec.subjectName} (${rec.subjectCode})`,
                 rec.semester,
