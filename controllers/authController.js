@@ -38,7 +38,7 @@ const validatePassword = (p) => p && p.length >= 6
 // POST /api/auth/register/student
 export const registerStudent = async (req, res, next) => {
     try {
-        const { name, email, password, rollNumber, phone, semester, section, fcmToken, designation } = req.body
+        const { name, email, password, rollNumber, phone, semester, section, fcmToken, designation, departmentId, departmentName, batch, deviceId } = req.body
 
         // Validate required fields
         const err = validateRequired(['name', 'email', 'password', 'rollNumber', 'semester', 'section'], req.body)
@@ -75,15 +75,15 @@ export const registerStudent = async (req, res, next) => {
             phone: phone || null,
             profilePhotoUrl: null,
             rollNumber: rollNumber.trim(),
-            departmentId: null,
-            departmentName: null,
+            departmentId: departmentId || null,
+            departmentName: departmentName ? departmentName.trim() : null,
             semester: semNum,
             section: section.trim(),
-            batch: null,
+            batch: batch ? batch.trim() : null,
             enrolledClasses: [],
             faceDescriptor: null,
             faceRegistered: false,
-            deviceId: null,
+            deviceId: deviceId || null,
             fcmToken: fcmToken || null,
             attendanceWarned: false,
             isActive: true,
