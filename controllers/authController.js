@@ -67,6 +67,12 @@ export const registerStudent = async (req, res, next) => {
         }
 
         // Create Firestore document with COMPLETE student schema
+        // Helper to format title case properly regardless of user input: "cOMpUTer sCIence" -> "Computer Science"
+        const formatTitleCase = (str) => {
+            if (!str) return null;
+            return str.trim().toLowerCase().split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+        };
+
         const studentData = {
             studentId: newUser.uid,
             name: name.trim(),
@@ -75,10 +81,10 @@ export const registerStudent = async (req, res, next) => {
             phone: phone || null,
             profilePhotoUrl: null,
             rollNumber: rollNumber.trim(),
-            departmentId: departmentId || null,
-            departmentName: departmentName ? departmentName.trim() : null,
+            departmentId: departmentId ? departmentId.trim().toUpperCase() : null,
+            departmentName: formatTitleCase(departmentName),
             semester: semNum,
-            section: section.trim(),
+            section: section.trim().toUpperCase(),
             batch: batch ? batch.trim() : null,
             enrolledClasses: [],
             faceDescriptor: null,
