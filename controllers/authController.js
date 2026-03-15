@@ -81,7 +81,7 @@ export const registerStudent = async (req, res, next) => {
             phone: phone || null,
             profilePhotoUrl: null,
             rollNumber: rollNumber.trim(),
-            departmentId: departmentId ? departmentId.trim().toUpperCase() : null,
+            departmentId: departmentId ? departmentId.trim() : null,
             departmentName: formatTitleCase(departmentName),
             semester: semNum,
             section: section.trim().toUpperCase(),
