@@ -64,6 +64,7 @@ export const verifyToken = async (req, res, next) => {
                     departmentName: userData.departmentName || null,
                     isHod: false,
                     name: userData.name,
+                    rollNumber: userData.rollNumber || null,
                     isActive: userData.isActive,
                     email: userData.email
                 }
@@ -115,6 +116,7 @@ export const verifyToken = async (req, res, next) => {
                     departmentName: userData.departmentName || null,
                     isHod: userData.isHod || false,
                     name: userData.name,
+                    rollNumber: userData.rollNumber || null,
                     isActive: userData.isActive !== undefined ? userData.isActive : true,
                     email: userData.email
                 }
