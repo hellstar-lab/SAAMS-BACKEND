@@ -20,7 +20,7 @@ const fetchAndVerifySession = async (sessionId, uid) => {
     if (!sessionDoc.exists) {
         return { error: { message: 'Session not found', code: 'SESSION_NOT_FOUND', status: 404 } }
     }
-    const sessionData = { id: sessionDoc.id, ...sessionDoc.data() }
+    const sessionData = { id: sessionDoc.id, ...sessionDoc.data(), normalizedSSID: sessionDoc.data().normalizedSSID ?? null }
     if (sessionData.teacherId !== uid) {
         return { error: { message: 'Unauthorized — not your session', code: 'NOT_YOUR_SESSION', status: 403 } }
     }
@@ -114,14 +114,16 @@ export const startSession = async (req, res, next) => {
             }
         }
 
+        let normalizedSSID = null; // only used for network mode
         if (method === 'network') {
-            if (!expectedSSID) {
+            if (!expectedSSID || typeof expectedSSID !== "string" || expectedSSID.trim() === "") {
                 return res.status(400).json({
                     success: false,
-                    error: 'expectedSSID is required for network method',
-                    code: 'SSID_REQUIRED'
-                })
+                    error: "expectedSSID is required for Network mode",
+                    code: "MISSING_SSID"
+                });
             }
+            normalizedSSID = expectedSSID.trim().toLowerCase();
         }
 
         // 6. Fetch teacher document for teacherName
@@ -176,7 +178,7 @@ export const startSession = async (req, res, next) => {
             radiusMeters: method === 'gps' ? (radiusMeters || 50) : null,
 
             // Network fields
-            expectedSSID: method === 'network' ? expectedSSID : null,
+            normalizedSSID: normalizedSSID,
 
             // Bluetooth fields
             bleSessionCode: method === 'bluetooth' ? generatedBleCode : null,
@@ -276,7 +278,7 @@ export const endSession = async (req, res, next) => {
                 code: 'SESSION_NOT_FOUND'
             })
         }
-        const sessionData = { id: sessionSnap.id, ...sessionSnap.data() }
+        const sessionData = { id: sessionSnap.id, ...sessionSnap.data(), normalizedSSID: sessionSnap.data().normalizedSSID ?? null }
 
         // 4. Verify teacher owns session
         if (sessionData.teacherId !== req.user.uid) {
@@ -399,6 +401,8 @@ export const endSession = async (req, res, next) => {
                 distanceFromClass: null,
                 networkSSID: null,
                 bleRSSI: null,
+                networkVerified: false,
+                studentSSID: null,
                 joinedAt: FieldValue.serverTimestamp(),
                 markedAt: FieldValue.serverTimestamp(),
                 createdAt: FieldValue.serverTimestamp()
@@ -676,6 +680,7 @@ export const getActiveSession = async (req, res, next) => {
             qrCode: session.qrCode || null,
             qrRefreshInterval: session.qrRefreshInterval || null,
             qrRefreshedAt: session.qrRefreshedAt?.toDate?.()?.toISOString() || null,
+            normalizedSSID: session.normalizedSSID ?? null,
             
             // GPS Fields - Strictly required by frontend schema
             teacherLat: session.teacherLat !== undefined ? session.teacherLat : null,
@@ -719,7 +724,7 @@ export const getSessionById = async (req, res, next) => {
             return errorResponse(res, 'Session not found', 404, 'SESSION_NOT_FOUND')
         }
 
-        const sessionData = { id: sessionDoc.id, ...sessionDoc.data() }
+        const sessionData = { id: sessionDoc.id, ...sessionDoc.data(), normalizedSSID: sessionDoc.data().normalizedSSID ?? null }
 
         // 2. Verify: teacher OR student in class
         if (sessionData.teacherId !== uid) {
@@ -783,6 +788,7 @@ export const getClassSessions = async (req, res, next) => {
             .map(doc => ({
                 id: doc.id,
                 ...doc.data(),
+                normalizedSSID: doc.data().normalizedSSID ?? null,
                 startTime: doc.data().startTime?.toDate?.()?.toISOString() || null,
                 endTime: doc.data().endTime?.toDate?.()?.toISOString() || null
             }))
@@ -865,7 +871,7 @@ export const getSessionStats = async (req, res, next) => {
                 code: 'SESSION_NOT_FOUND'
             })
         }
-        const sessionData = { id: sessionSnap.id, ...sessionSnap.data() }
+        const sessionData = { id: sessionSnap.id, ...sessionSnap.data(), normalizedSSID: sessionSnap.data().normalizedSSID ?? null }
 
         // 3. Verify teacher owns session
         if (sessionData.teacherId !== req.user.uid) {
@@ -955,7 +961,7 @@ export const getMySessionHistory = async (req, res, next) => {
             return res.status(200).json({ success: true, data: [], count: 0 });
         }
 
-        let sessions = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        let sessions = snap.docs.map(doc => ({ id: doc.id, ...doc.data(), normalizedSSID: doc.data().normalizedSSID ?? null }));
         
         // Sort in-memory by startTime descending
         sessions.sort((a, b) => {

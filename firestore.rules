@@ -147,7 +147,10 @@ service cloud.firestore {
         (isHod() && sameDepartment(resource.data.departmentId))
       );
       
-      allow create: if isAuthenticated();
+      allow create: if isAuthenticated()
+        && request.auth.uid == request.resource.data.studentId
+        && (!("networkVerified" in request.resource.data) || request.resource.data.networkVerified == null)
+        && (!("studentSSID" in request.resource.data) || request.resource.data.studentSSID == null);
       allow update: if isAuthenticated() && isTeacher() && resource.data.teacherId == request.auth.uid;
       allow delete: if false;
     }

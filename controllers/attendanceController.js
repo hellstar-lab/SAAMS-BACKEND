@@ -12,6 +12,13 @@ import { notifyStudentLate, notifyLowAttendance, notifyAttendanceDecision, notif
 import { updateSummaryOnAttendance, updateSummaryOnApproval, getSummaryForClass } from '../utils/summaryUpdater.js';
 import { checkDuplicateDevice, checkRapidScan, checkGPSProximity } from '../utils/fraudDetector.js';
 
+const normalizeSSID = (ssid) => {
+    if (!ssid || typeof ssid !== "string") {
+        return null;
+    }
+    return ssid.trim().toLowerCase();
+};
+
 // ─── Haversine Distance Formula ───────────────────────────────────────────────
 /**
  * Calculate distance between two GPS coordinates using Haversine formula
@@ -125,27 +132,70 @@ const validateGPSMethod = (session, body) => {
     };
 };
 
+const networkAttemptMap = new Map();
+
 /**
  * @param {Object} session - Firestore session data
  * @param {Object} body - Request body
+ * @param {string} studentId - The ID of the student requesting attendance
  * @returns {{ valid: boolean, code?: string, error?: string, statusCode?: number, extraFields?: Object }}
  */
-const validateNetworkMethod = (session, body) => {
-    const { studentSSID } = body;
-    if (!studentSSID || typeof studentSSID !== 'string') {
-        return { valid: false, code: 'SSID_REQUIRED', error: 'studentSSID is required' };
+const validateNetworkMethod = (session, body, studentId) => {
+    if (studentId && networkAttemptMap.has(studentId)) {
+        const attempt = networkAttemptMap.get(studentId);
+        if (Date.now() - attempt.firstAttempt > 60000) {
+            networkAttemptMap.delete(studentId);
+        } else if (attempt.count >= 3) {
+            return {
+                valid: false,
+                code: 'RATE_LIMITED',
+                error: 'Too many failed network attempts',
+                statusCode: 429
+            };
+        }
     }
-    const { expectedSSID } = session;
-    if (!expectedSSID) {
+
+    const { studentSSID } = body;
+    if (!studentSSID || typeof studentSSID !== 'string' || studentSSID.trim() === '') {
+        return { valid: false, code: 'MISSING_STUDENT_SSID', error: 'Network mode requires studentSSID', statusCode: 400 };
+    }
+    const normalizedSSID = session.normalizedSSID ?? null;
+    if (!normalizedSSID) {
         return { valid: false, code: 'SESSION_SSID_MISSING', error: 'Session does not have an expected SSID configured', statusCode: 500 };
     }
-    if (studentSSID.toLowerCase() !== expectedSSID.toLowerCase()) {
+    
+    const normalizedStudentSSID = normalizeSSID(studentSSID);
+    
+    if (normalizedStudentSSID !== normalizedSSID) {
+        if (studentId) {
+            const attempt = networkAttemptMap.get(studentId);
+            if (attempt) {
+                networkAttemptMap.set(studentId, {
+                    count: attempt.count + 1,
+                    firstAttempt: attempt.firstAttempt
+                });
+            } else {
+                networkAttemptMap.set(studentId, { count: 1, firstAttempt: Date.now() });
+            }
+        }
+
         return {
-            valid: false, code: 'NETWORK_MISMATCH', error: 'Connected network does not match the classroom network',
-            extraFields: { expectedSSID, studentSSID }
+            valid: false, 
+            code: 'NETWORK_MISMATCH', 
+            error: 'Student not connected to required WiFi',
+            statusCode: 403,
+            extraFields: {
+                expectedNetwork: normalizedSSID,
+                studentNetwork: normalizedStudentSSID
+            }
         };
     }
-    return { valid: true, extraFields: { networkSSID: studentSSID } };
+    
+    if (studentId) {
+        networkAttemptMap.delete(studentId);
+    }
+
+    return { valid: true };
 };
 
 /**
@@ -249,7 +299,7 @@ export const markAttendance = async (req, res, next) => {
             }
 
             // Method-specific validation
-            const validation = METHOD_VALIDATORS[method](session, req.body);
+            const validation = METHOD_VALIDATORS[method](session, req.body, studentId);
             if (!validation.valid) {
                 throw new AttendanceError(
                     validation.code, validation.error,
@@ -263,6 +313,11 @@ export const markAttendance = async (req, res, next) => {
             const isLate = minutesSinceStart > (session.lateAfterMinutes || 10);
             const status = isLate ? 'late' : 'present';
             const teacherApproved = isLate ? null : true;
+            
+            const isNetworkMode = session.method === "network";
+            const normalizedStudentSSID = isNetworkMode ? normalizeSSID(req.body.studentSSID) : null;
+            const normalizedSSID = session.normalizedSSID ?? null;
+            const ssidMatched = isNetworkMode ? normalizedStudentSSID === normalizedSSID : null;
 
             // Build and write attendance document
             const now = FieldValue.serverTimestamp();
@@ -277,6 +332,8 @@ export const markAttendance = async (req, res, next) => {
                 status,
                 method,
                 faceVerified: false,
+                networkVerified: isNetworkMode ? ssidMatched : null,
+                studentSSID: isNetworkMode ? normalizedStudentSSID : null,
                 joinedAt: now,
                 markedAt: now,
                 teacherApproved,
@@ -492,6 +549,8 @@ export const endSessionAndMarkAbsent = async (req, res, next) => {
                 distanceFromClass: null,
                 networkSSID: null,
                 bleRSSI: null,
+                networkVerified: false,
+                studentSSID: null,
                 joinedAt: FieldValue.serverTimestamp(),
                 markedAt: FieldValue.serverTimestamp(),
                 createdAt: FieldValue.serverTimestamp()
@@ -590,7 +649,7 @@ export const getSessionAttendance = async (req, res, next) => {
         if (!sessionDoc.exists) {
             return res.status(404).json({ success: false, code: 'SESSION_NOT_FOUND', error: 'Session not found' });
         }
-        const session = { id: sessionDoc.id, ...sessionDoc.data() };
+        const session = { id: sessionDoc.id, ...sessionDoc.data(), normalizedSSID: sessionDoc.data().normalizedSSID ?? null };
 
         if (session.teacherId !== uid && role !== 'hod' && role !== 'superAdmin') {
             return res.status(403).json({ success: false, code: 'UNAUTHORIZED', error: 'You do not own this session' });
@@ -690,7 +749,7 @@ export const exportClassExcel = async (req, res, next) => {
 
         let sessionQuery = db.collection('sessions').where('classId', '==', classId);
         const sessionsSnap = await sessionQuery.get();
-        let sessions = sessionsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        let sessions = sessionsSnap.docs.map(d => ({ id: d.id, ...d.data(), normalizedSSID: d.data().normalizedSSID ?? null }));
 
         if (startDate && endDate) {
             const start = new Date(startDate).getTime();
@@ -711,7 +770,7 @@ export const exportClassExcel = async (req, res, next) => {
             }
             const snapResults = await Promise.all(batchPromises);
             for (const aSnap of snapResults) {
-                attendanceRecords.push(...aSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+                attendanceRecords.push(...aSnap.docs.map(d => ({ id: d.id, ...d.data(), networkVerified: d.data().networkVerified ?? null, studentSSID: d.data().studentSSID ?? null })));
             }
         }
 
@@ -755,7 +814,7 @@ export const exportClassPdf = async (req, res, next) => {
 
         let sessionQuery = db.collection('sessions').where('classId', '==', classId);
         const sessionsSnap = await sessionQuery.get();
-        let sessions = sessionsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        let sessions = sessionsSnap.docs.map(d => ({ id: d.id, ...d.data(), normalizedSSID: d.data().normalizedSSID ?? null }));
 
         if (startDate && endDate) {
             const start = new Date(startDate).getTime();
@@ -776,7 +835,7 @@ export const exportClassPdf = async (req, res, next) => {
             }
             const snapResults = await Promise.all(batchPromises);
             for (const aSnap of snapResults) {
-                attendanceRecords.push(...aSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+                attendanceRecords.push(...aSnap.docs.map(d => ({ id: d.id, ...d.data(), networkVerified: d.data().networkVerified ?? null, studentSSID: d.data().studentSSID ?? null })));
             }
         }
 
@@ -1017,6 +1076,8 @@ export const getStudentAttendance = async (req, res, next) => {
             .map(d => ({
                 id: d.id,
                 ...d.data(),
+                networkVerified: d.data().networkVerified ?? null,
+                studentSSID: d.data().studentSSID ?? null,
                 joinedAt: d.data().joinedAt?.toDate?.()?.toISOString() || null,
                 markedAt: d.data().markedAt?.toDate?.()?.toISOString() || null
             }))
@@ -1102,7 +1163,7 @@ export const updateAttendanceStatus = async (req, res, next) => {
             success: true,
             data: {
                 message: 'Attendance status correctly verified up over local block limit',
-                attendance: { id: updated.id, ...updated.data() }
+                attendance: { id: updated.id, ...updated.data(), networkVerified: updated.data().networkVerified ?? null, studentSSID: updated.data().studentSSID ?? null }
             }
         });
 
@@ -1126,7 +1187,7 @@ export const fetchReportData = async (classId, teacherId, fromDate, toDate) => {
         .get();
 
     const sessions = sessionsSnap.docs
-        .map(d => ({ id: d.id, ...d.data() }))
+        .map(d => ({ id: d.id, ...d.data(), normalizedSSID: d.data().normalizedSSID ?? null }))
         .filter(s => {
             if (!s.startTime) return true;
             const t = s.startTime.toDate ? s.startTime.toDate() : new Date(s.startTime);
@@ -1145,7 +1206,7 @@ export const fetchReportData = async (classId, teacherId, fromDate, toDate) => {
     for (let i = 0; i < sessionIds.length; i += 30) {
         const batch = sessionIds.slice(i, i + 30);
         const snap = await db.collection('attendance').where('sessionId', 'in', batch).get();
-        allRecords.push(...snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        allRecords.push(...snap.docs.map(d => ({ id: d.id, ...d.data(), networkVerified: d.data().networkVerified ?? null, studentSSID: d.data().studentSSID ?? null })));
     }
 
     const summaryMap = buildStudentSummary(allRecords, sessions.length);
@@ -1243,7 +1304,7 @@ export const exportSessionExcel = async (req, res, next) => {
         if (!sessionDoc.exists) {
             return errorResponse(res, 'Session not found', 404, 'SESSION_NOT_FOUND');
         }
-        const sessionData = { id: sessionDoc.id, ...sessionDoc.data() };
+        const sessionData = { id: sessionDoc.id, ...sessionDoc.data(), normalizedSSID: sessionDoc.data().normalizedSSID ?? null };
 
         if (sessionData.classId !== classId) {
             return errorResponse(res, 'Session does not belong to this class', 400, 'CLASS_MISMATCH');
@@ -1264,7 +1325,7 @@ export const exportSessionExcel = async (req, res, next) => {
         const attSnap = await db.collection('attendance')
             .where('sessionId', '==', sessionId)
             .get();
-        const rawRecords = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const rawRecords = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data(), networkVerified: doc.data().networkVerified ?? null, studentSSID: doc.data().studentSSID ?? null }));
 
         // ── 5. Batch-fetch student profiles for enrichment ──
         const studentIds = [...new Set(rawRecords.map(r => r.studentId).filter(Boolean))];
@@ -1334,7 +1395,7 @@ export const exportSessionPdf = async (req, res, next) => {
         if (!sessionDoc.exists) {
             return errorResponse(res, 'Session not found', 404, 'SESSION_NOT_FOUND');
         }
-        const sessionData = { id: sessionDoc.id, ...sessionDoc.data() };
+        const sessionData = { id: sessionDoc.id, ...sessionDoc.data(), normalizedSSID: sessionDoc.data().normalizedSSID ?? null };
 
         if (sessionData.classId !== classId) {
             return errorResponse(res, 'Session does not belong to this class', 400, 'CLASS_MISMATCH');
@@ -1355,7 +1416,7 @@ export const exportSessionPdf = async (req, res, next) => {
         const attSnap = await db.collection('attendance')
             .where('sessionId', '==', sessionId)
             .get();
-        const rawRecords = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const rawRecords = attSnap.docs.map(doc => ({ id: doc.id, ...doc.data(), networkVerified: doc.data().networkVerified ?? null, studentSSID: doc.data().studentSSID ?? null }));
 
         // ── 5. Batch-fetch student profiles for enrichment ──
         const studentIds = [...new Set(rawRecords.map(r => r.studentId).filter(Boolean))];

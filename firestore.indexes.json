@@ -480,6 +480,24 @@
                     "order": "ASCENDING"
                 }
             ]
+        },
+        {
+            "collectionGroup": "attendance",
+            "queryScope": "COLLECTION",
+            "fields": [
+                {
+                    "fieldPath": "method",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "networkVerified",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "sessionId",
+                    "order": "ASCENDING"
+                }
+            ]
         }
     ],
     "fieldOverrides": []
