@@ -11,7 +11,7 @@ const firebaseApp = initializeApp({ credential: cert(serviceAccount) }, 'tester'
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 
-const FIREBASE_WEB_API_KEY = 'AIzaSyDjOW32jxwkxNw6HKKWwJ5AGr2mywv9BQs';
+const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY || '[YOUR_API_KEY]';
 const BASE_URL = 'http://localhost:3000/api';
 
 function httpRequest(urlStr, opts = {}, body = null) {
