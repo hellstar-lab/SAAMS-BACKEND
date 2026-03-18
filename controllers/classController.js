@@ -1068,6 +1068,19 @@ export const getStudentClasses = async (req, res, next) => {
                     .limit(1)
                     .get()
 
+                // Fetch the latest attendance record for this student in this class
+                const latestAttendanceQuery = await db.collection('attendance')
+                    .where('classId', '==', classId)
+                    .where('studentId', '==', uid)
+                    .orderBy('createdAt', 'desc')
+                    .limit(1)
+                    .get()
+                
+                let latestAttendanceId = null;
+                if (!latestAttendanceQuery.empty) {
+                    latestAttendanceId = latestAttendanceQuery.docs[0].id;
+                }
+
                 classesData.push({
                     classId: cls.id,
                     subjectName: cls.subjectName,
@@ -1076,7 +1089,8 @@ export const getStudentClasses = async (req, res, next) => {
                     section: cls.section,
                     teacherName: cls.teacherName,
                     hasActiveSession: !activeSession.empty,
-                    activeSessionId: activeSession.empty ? null : activeSession.docs[0].id
+                    activeSessionId: activeSession.empty ? null : activeSession.docs[0].id,
+                    latestAttendanceId
                 })
             }
         }))

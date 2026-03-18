@@ -90,7 +90,7 @@ const authLimiter = rateLimit({
 })
 
 // ─── BODY PARSING ─────────────────────────────────────────────────────────────
-app.use(cors({ origin: '*' }))
+app.use(cors({ origin: true, credentials: true }))
 // WHY: 50 MB limit allows raw base64 camera images from React Native
 app.use(bodyParser.json({ limit: '50mb' }))
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }))
