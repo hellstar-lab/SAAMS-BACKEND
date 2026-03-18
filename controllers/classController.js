@@ -352,8 +352,23 @@ export const addStudentsToClass = async (req, res, next) => {
             return errorResponse(res, 'Cannot add students to an archived class', 400, 'CLASS_ARCHIVED')
         }
 
-        // 5. De-duplicate and sanitise the incoming list
-        const uniqueIds = [...new Set(studentIds.map(id => String(id).trim()).filter(Boolean))]
+        // 5. De-duplicate and extract UIDs + sections
+        const studentDataMap = new Map()
+        for (const item of studentIds) {
+            if (!item) continue
+            let uid = ''
+            let section = null
+            if (typeof item === 'object') {
+                uid = String(item.uid || item.id || '').trim()
+                if (item.section) section = String(item.section).trim().toUpperCase()
+            } else {
+                uid = String(item).trim()
+            }
+            if (uid && !studentDataMap.has(uid)) {
+                studentDataMap.set(uid, section)
+            }
+        }
+        const uniqueIds = Array.from(studentDataMap.keys())
 
         // 6. Validate each UID in parallel against both 'students' and 'users' collections
         const validationResults = await Promise.all(
@@ -407,10 +422,15 @@ export const addStudentsToClass = async (req, res, next) => {
                 })
 
                 const studentRef = db.collection('students').doc(student.uid)
-                batch.update(studentRef, {
+                const studentUpdates = {
                     enrolledClasses: FieldValue.arrayUnion(classId),
                     updatedAt: FieldValue.serverTimestamp()
-                })
+                }
+                const providedSection = studentDataMap.get(student.uid)
+                if (providedSection) {
+                    studentUpdates.section = providedSection
+                }
+                batch.update(studentRef, studentUpdates)
 
                 const enrollmentRef = db.collection('enrollments').doc(`${student.uid}_${classId}`)
                 batch.set(enrollmentRef, {
