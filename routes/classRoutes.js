@@ -10,7 +10,8 @@ import {
     getClassStudents,
     getStudentClasses,
     importStudents,
-    getStudentDashboard
+    getStudentDashboard,
+    addStudentsFromExcel
 } from '../controllers/classController.js'
 
 const router = express.Router()
@@ -28,6 +29,7 @@ router.get('/', getMyClasses)
 // ─── Parameterized routes ──────────────────────────────────────────────────────
 router.get('/:classId', getClassById)
 router.post('/:classId/students', addStudentsToClass)
+router.post('/:classId/students/excel', addStudentsFromExcel)
 router.delete('/:classId/students/:studentId', removeStudentFromClass)
 router.patch('/:classId/archive', archiveClass)
 router.get('/:classId/students', getClassStudents)

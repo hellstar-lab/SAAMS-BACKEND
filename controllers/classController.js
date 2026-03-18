@@ -468,6 +468,183 @@ export const addStudentsToClass = async (req, res, next) => {
 }
 
 
+// ━━━ ADD STUDENTS FROM EXCEL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// POST /api/classes/:classId/students/excel
+export const addStudentsFromExcel = async (req, res, next) => {
+    try {
+        const { classId } = req.params
+        const { students } = req.body // Expected: [{ rollNumber: "...", section: "..." }]
+
+        // 1. Verify teacher or hod role
+        if (req.user.role !== 'teacher' && req.user.role !== 'hod') {
+            return errorResponse(res, 'Only teachers or HODs can add students', 403, 'TEACHER_ONLY')
+        }
+
+        // 2. Validate students array
+        if (!students || !Array.isArray(students) || students.length === 0) {
+            return errorResponse(res, 'students must be a non-empty array', 400, 'VALIDATION_ERROR')
+        }
+
+        // 3. Fetch class document and verify ownership
+        const { classData, error } = await fetchAndVerifyOwnership(classId, req.user.uid)
+        if (error) return errorResponse(res, error.message, error.status, error.code)
+
+        // 4. Verify class is active
+        if (!classData.isActive) {
+            return errorResponse(res, 'Cannot add students to an archived class', 400, 'CLASS_ARCHIVED')
+        }
+
+        // 5. De-duplicate input based on rollNumber
+        const uniqueStudentsMap = new Map()
+        for (const s of students) {
+            if (s && s.rollNumber) {
+                const rNum = String(s.rollNumber).trim().toUpperCase()
+                if (!uniqueStudentsMap.has(rNum)) {
+                    uniqueStudentsMap.set(rNum, {
+                        rollNumber: rNum,
+                        section: s.section ? String(s.section).trim().toUpperCase() : null
+                    })
+                }
+            }
+        }
+        const uniqueStudents = Array.from(uniqueStudentsMap.values())
+
+        if (uniqueStudents.length === 0) {
+            return errorResponse(res, 'No valid roll numbers provided in the payload', 400, 'VALIDATION_ERROR')
+        }
+
+        // 6. Validate each student by rollNumber in parallel
+        const validationResults = await Promise.all(
+            uniqueStudents.map(async (inputObj) => {
+                // A student should primarily be in the 'students' collection or legacy 'users' collection
+                const [studentSnap, userSnap] = await Promise.all([
+                    db.collection('students').where('rollNumber', '==', inputObj.rollNumber).limit(1).get(),
+                    db.collection('users').where('rollNumber', '==', inputObj.rollNumber).where('role', '==', 'student').limit(1).get()
+                ])
+
+                const exists = !studentSnap.empty || !userSnap.empty
+                const activeDoc = !studentSnap.empty ? studentSnap.docs[0] : (!userSnap.empty ? userSnap.docs[0] : null)
+                const data = activeDoc ? activeDoc.data() : null
+                
+                const uid = activeDoc ? activeDoc.id : null
+                const role = data?.role ?? null
+                const isActive = data?.isActive !== false
+                const name = data?.name ?? null
+                const dbSection = data?.section ? String(data.section).trim().toUpperCase() : null
+
+                return { 
+                    inputRollNumber: inputObj.rollNumber,
+                    inputSection: inputObj.section,
+                    uid,
+                    exists, 
+                    role, 
+                    name, 
+                    isActive,
+                    dbSection
+                }
+            })
+        )
+
+        // 7. Bucket each student by outcome
+        const notFound = []        // Roll number not in DB
+        const sectionMismatch = [] // Roll number exists, but sections don't match
+        const invalidRole = []     // Exists, but role is not 'student'
+        const deactivated = []     // Account deactivated
+        const alreadyEnrolled = [] // Already in this class
+        const toEnroll = []        // Valid, new students to add
+
+        const existingStudents = new Set(classData.students || [])
+
+        for (const r of validationResults) {
+            if (!r.exists) {
+                notFound.push(r.inputRollNumber)
+            } else if (r.role !== 'student') {
+                invalidRole.push(r.inputRollNumber)
+            } else if (!r.isActive) {
+                deactivated.push(r.inputRollNumber)
+            } else if (r.inputSection && r.dbSection && r.inputSection !== r.dbSection) {
+                sectionMismatch.push(`${r.inputRollNumber} (Excel: ${r.inputSection}, DB: ${r.dbSection})`)
+            } else if (existingStudents.has(r.uid)) {
+                alreadyEnrolled.push(r.inputRollNumber)
+            } else {
+                toEnroll.push(r)
+            }
+        }
+
+        // 8. Enroll valid, not-yet-enrolled students via Firestore batch
+        if (toEnroll.length > 0) {
+            const batch = db.batch()
+            const classRef = db.collection('classes').doc(classId)
+
+            for (const student of toEnroll) {
+                batch.update(classRef, {
+                    students: FieldValue.arrayUnion(student.uid),
+                    updatedAt: FieldValue.serverTimestamp()
+                })
+
+                const studentRef = db.collection('students').doc(student.uid)
+                batch.update(studentRef, {
+                    enrolledClasses: FieldValue.arrayUnion(classId),
+                    updatedAt: FieldValue.serverTimestamp()
+                })
+
+                const enrollmentRef = db.collection('enrollments').doc(`${student.uid}_${classId}`)
+                batch.set(enrollmentRef, {
+                    studentId: student.uid,
+                    classId,
+                    enrolledAt: FieldValue.serverTimestamp(),
+                    status: 'active',
+                    teacherId: classData.teacherId,
+                    subjectName: classData.subjectName,
+                }, { merge: true })
+            }
+
+            await batch.commit()
+        }
+
+        const enrolledRollNumbers = toEnroll.map(s => s.inputRollNumber)
+
+        // 9. Audit log (fire and forget)
+        logAction(
+            db,
+            ACTIONS.STUDENT_ADDED,
+            req.user.uid,
+            getActorRole(req.user.role),
+            classId,
+            TARGET_TYPES.CLASS,
+            createDetails({
+                method: 'excel_import',
+                enrolledCount: enrolledRollNumbers.length,
+                alreadyEnrolledCount: alreadyEnrolled.length,
+                notFoundCount: notFound.length,
+                sectionMismatchCount: sectionMismatch.length,
+                enrolledRollNumbers
+            }),
+            classData.departmentId,
+            req.ip
+        )
+
+        // 10. Return structured response matching frontend expectations
+        return res.status(200).json({
+            success: true,
+            message: `${enrolledRollNumbers.length} student(s) enrolled successfully from Excel.`,
+            data: {
+                enrolled: enrolledRollNumbers,
+                alreadyEnrolled,
+                notFound,
+                sectionMismatch,
+                invalidRole,
+                deactivated,
+                totalStudents: (classData.students || []).length + enrolledRollNumbers.length
+            }
+        })
+
+    } catch (error) {
+        console.error('addStudentsFromExcel error:', error)
+        next(error)
+    }
+}
+
 // ━━━ REMOVE STUDENT FROM CLASS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // DELETE /api/classes/:classId/students/:studentId
 export const removeStudentFromClass = async (req, res, next) => {
