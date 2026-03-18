@@ -783,7 +783,7 @@ export const getClassSessions = async (req, res, next) => {
 
         const snap = await query.get()
 
-        // Sort in-memory by startTime descending, then limit
+        // Sort in-memory by startTime descending (removed limit)
         const sessions = snap.docs
             .map(doc => ({
                 id: doc.id,
@@ -797,7 +797,6 @@ export const getClassSessions = async (req, res, next) => {
                 if (!b.startTime) return -1
                 return new Date(b.startTime) - new Date(a.startTime)
             })
-            .slice(0, Number(limit))
 
         return successResponse(res, { data: sessions, total: sessions.length })
 
