@@ -13,13 +13,13 @@ import authRoutes from './routes/authRoutes.js'
 import classRoutes from './routes/classRoutes.js'
 import sessionRoutes from './routes/sessionRoutes.js'
 import attendanceRoutes from './routes/attendanceRoutes.js'
-import faceRoutes from './routes/faceRoutes.js'
+
 import departmentRoutes from './routes/departmentRoutes.js'
 import hodRoutes from './routes/hodRoutes.js'
 import disputeRoutes from './routes/disputeRoutes.js'
 import notificationRoutes from './routes/notificationRoutes.js'
 import superAdminRoutes from './routes/superAdminRoutes.js'
-import { initFaceApi } from './utils/faceService.js'
+
 import { errorMiddleware } from './middleware/errorMiddleware.js'
 import { concurrencyMiddleware, getConcurrencyStats } from './middleware/concurrencyMiddleware.js'
 import { getCacheStats } from './middleware/cacheMiddleware.js'
@@ -129,7 +129,7 @@ app.use('/api/auth', authLimiter, authRoutes)
 app.use('/api/classes',       generalLimiter, classRoutes)
 app.use('/api/sessions',      generalLimiter, sessionRoutes)
 app.use('/api/attendance',    generalLimiter, attendanceRoutes)
-app.use('/api/face',          generalLimiter, faceRoutes)
+
 app.use('/api/departments',   generalLimiter, departmentRoutes)
 app.use('/api/hod',           generalLimiter, hodRoutes)
 app.use('/api/disputes',      generalLimiter, disputeRoutes)
@@ -149,11 +149,7 @@ app.use((req, res) => {
 // WHY: Catches all unhandled errors from any route and formats them safely for clients
 app.use(errorMiddleware)
 
-// ─── FACE-API PRELOAD ────────────────────────────────────────────────────────
-// WHY: Pre-warm face model loading at startup so first student registration is not slow
-initFaceApi().catch(err => {
-  console.warn('⚠️  face-api models could not be pre-loaded:', err.message)
-})
+
 
 // ─── SERVER WITH KEEP-ALIVE ──────────────────────────────────────────────────
 // WHY: keepAliveTimeout = 65s is slightly above Render's 60s load balancer timeout
