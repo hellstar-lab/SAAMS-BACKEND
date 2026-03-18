@@ -1059,7 +1059,7 @@ export const getStudentClasses = async (req, res, next) => {
             if (!classId) return
             const classDoc = await db.collection('classes').doc(classId).get()
             
-            if (classDoc.exists && classDoc.data().isActive === true) {
+            if (classDoc.exists) {
                 const cls = { id: classId, ...classDoc.data() }
 
                 const activeSession = await db.collection('sessions')
@@ -1162,7 +1162,7 @@ export const getStudentDashboard = async (req, res, next) => {
             if (!classId) return
             const classDoc = await db.collection('classes').doc(classId).get()
             
-            if (classDoc.exists && classDoc.data().isActive === true) {
+            if (classDoc.exists) {
                 const cls = { id: classId, ...classDoc.data() }
 
                 // Check active session
