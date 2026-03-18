@@ -1068,11 +1068,13 @@ export const getStudentClasses = async (req, res, next) => {
                     .limit(1)
                     .get()
 
-                // Fetch the latest attendance record for this student in this class
+                // FIX (Bug 2): Removed .orderBy('createdAt', 'desc') — that compound query
+                // (where + where + orderBy on a different field) requires a composite Firestore
+                // index that was absent, causing FAILED_PRECONDITION → 503 DB_UNAVAILABLE.
+                // We only need the latest attendanceId; ordering is not critical here.
                 const latestAttendanceQuery = await db.collection('attendance')
                     .where('classId', '==', classId)
                     .where('studentId', '==', uid)
-                    .orderBy('createdAt', 'desc')
                     .limit(1)
                     .get()
                 
@@ -1105,6 +1107,20 @@ export const getStudentClasses = async (req, res, next) => {
 
     } catch (error) {
         console.error('getStudentClasses error:', error)
+        // FIX (Bug 2): Detect missing Firestore composite index — surfaces as FAILED_PRECONDITION
+        // (gRPC code 9). Return a distinct error code so callers can differentiate from a
+        // true DB outage. Create the required index in Firebase Console to resolve permanently.
+        if (
+            error.code === 9 ||
+            (error.message && error.message.includes('requires an index'))
+        ) {
+            console.error('[my-classes] Missing Firestore composite index — see:', error.message)
+            return res.status(503).json({
+                success: false,
+                error: 'Service temporarily unavailable — index building',
+                code: 'INDEX_BUILDING'
+            })
+        }
         if (next) return next(error)
         return res.status(500).json({ success: false, error: 'Database fetch failed' })
     }
@@ -1156,22 +1172,35 @@ export const getStudentDashboard = async (req, res, next) => {
                     .limit(1)
                     .get()
 
-                // Check attendance summary for this student in this class
-                const summaryDoc = await db.collection('attendanceSummary').doc(`${uid}_${classId}`).get()
-                let summary = {
-                    present: 0,
-                    late: 0,
-                    absent: 0,
-                    totalSessions: 0,
-                    percentage: 0,
-                    isBelowThreshold: false
+                // FIX (Bug 1): Previously read from `attendanceSummary` collection, which
+                // returns totalSessions=0 when the summary document hasn't been written yet.
+                // Now we live-query the `attendance` collection directly (the source of truth):
+                //   totalSessions = count of ALL attendance records for this student+class
+                //   attended      = count where status === 'present'
+                const attendanceSnap = await db.collection('attendance')
+                    .where('studentId', '==', uid)
+                    .where('classId', '==', classId)
+                    .get()
+
+                const totalSessions = attendanceSnap.size
+                const attended = attendanceSnap.docs.filter(d => d.data().status === 'present').length
+                const percentage = totalSessions > 0
+                    ? parseFloat(((attended / totalSessions) * 100).toFixed(1))
+                    : 0
+                const minAttendance = cls.minAttendance || 75
+
+                const summary = {
+                    present: attended,
+                    late: attendanceSnap.docs.filter(d => d.data().status === 'late').length,
+                    absent: attendanceSnap.docs.filter(d => d.data().status === 'absent').length,
+                    totalSessions,
+                    attended,
+                    percentage,
+                    isBelowThreshold: totalSessions > 0 && percentage < minAttendance
                 }
-                
-                if (summaryDoc.exists) {
-                    summary = summaryDoc.data()
-                    totalPresentAll += (summary.present || 0) + (summary.late || 0)
-                    totalSessionsAll += summary.totalSessions || 0
-                }
+
+                totalPresentAll += attended
+                totalSessionsAll += totalSessions
 
                 classesData.push({
                     classId: cls.id,
@@ -1180,7 +1209,7 @@ export const getStudentDashboard = async (req, res, next) => {
                     semester: cls.semester,
                     section: cls.section,
                     teacherName: cls.teacherName,
-                    minAttendance: cls.minAttendance || 75,
+                    minAttendance: minAttendance,
                     hasActiveSession: !activeSession.empty,
                     activeSessionId: activeSession.empty ? null : activeSession.docs[0].id,
                     attendanceSummary: summary
