@@ -1044,3 +1044,102 @@ export const getMySessionHistory = async (req, res, next) => {
 }
 
 
+
+// ━━━ GET ALL ACTIVE SESSIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GET /api/sessions/all-active
+export const getAllActiveSessions = async (req, res, next) => {
+    try {
+        const uid = req.user.uid;
+
+        // 1. Fetch enrollments
+        const enrollmentQuery = await db.collection('enrollments')
+            .where('studentId', '==', uid)
+            .get();
+
+        if (enrollmentQuery.empty) {
+            return res.status(200).json({
+                success: true,
+                data: [],
+                message: 'You are not enrolled in any classes'
+            });
+        }
+
+        const enrolledClassIds = enrollmentQuery.docs.map(doc => doc.data().classId);
+
+        // 2. Fetch active sessions for these classes
+        const activeSessions = [];
+        
+        await Promise.all(enrolledClassIds.map(async (classId) => {
+            const activeQuery = await db.collection('sessions')
+                .where('classId', '==', classId)
+                .where('status', '==', 'active')
+                .limit(1)
+                .get();
+
+            if (!activeQuery.empty) {
+                const sessionDoc = activeQuery.docs[0];
+                const session = sessionDoc.data();
+                
+                const MILLISECONDS_PER_MINUTE = 60000;
+                const startTimeMillis = session.startTime.toMillis();
+                const currentTimeMillis = Date.now();
+                const minutesSinceStart = (currentTimeMillis - startTimeMillis) / MILLISECONDS_PER_MINUTE;
+                const maxDurationMinutes = session.autoAbsentMinutes || 120;
+
+                if (minutesSinceStart > maxDurationMinutes) {
+                    await sessionDoc.ref.update({
+                        status: 'ended',
+                        endTime: admin.firestore.FieldValue.serverTimestamp(),
+                        autoEnded: true
+                    });
+                    return; // Skip this one, it expired
+                }
+
+                const classDoc = await db.collection('classes').doc(session.classId).get();
+                const classData = classDoc.exists ? classDoc.data() : {};
+                
+                activeSessions.push({
+                    id: sessionDoc.id,
+                    sessionId: sessionDoc.id,
+                    classId: session.classId,
+                    teacherId: session.teacherId,
+                    subjectName: session.subjectName,
+                    subjectCode: session.subjectCode,
+                    method: session.method,
+                    status: session.status,
+                    startTime: session.startTime?.toDate?.()?.toISOString() || null,
+                    totalStudents: session.totalStudents || classData.students?.length || 0,
+                    lateAfterMinutes: session.lateAfterMinutes || 10,
+                    autoAbsentMinutes: session.autoAbsentMinutes || 5,
+                    qrCode: session.qrCode || null,
+                    qrRefreshInterval: session.qrRefreshInterval || null,
+                    qrRefreshedAt: session.qrRefreshedAt?.toDate?.()?.toISOString() || null,
+                    normalizedSSID: session.normalizedSSID ?? null,
+                    teacherLat: session.teacherLat !== undefined ? session.teacherLat : null,
+                    teacherLng: session.teacherLng !== undefined ? session.teacherLng : null,
+                    radiusMeters: session.radiusMeters !== undefined ? session.radiusMeters : null,
+                    departmentId: session.departmentId,
+                    semester: session.semester,
+                    section: session.section,
+                    batch: session.batch,
+                    academicYear: session.academicYear
+                });
+            }
+        }));
+
+        return res.status(200).json({
+            success: true,
+            data: activeSessions,
+            message: "Active sessions retrieved successfully"
+        });
+
+    } catch (error) {
+        console.error('getAllActiveSessions error:', error);
+        if (next) return next(error);
+        return res.status(500).json({
+            success: false,
+            code: "SERVER_ERROR",
+            error: "Failed to fetch active sessions"
+        });
+    }
+};

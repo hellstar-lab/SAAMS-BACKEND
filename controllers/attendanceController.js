@@ -1053,9 +1053,13 @@ export const manualApprove = async (req, res, next) => {
 // ━━━ GET STUDENT ATTENDANCE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export const getStudentAttendance = async (req, res, next) => {
     try {
-        const { studentId } = req.params;
+        let { studentId } = req.params;
         const { classId, limit = 20 } = req.query;
         const uid = req.user.uid;
+
+        if (studentId === 'me') {
+            studentId = uid;
+        }
 
         if (uid !== studentId) {
             if (classId) {

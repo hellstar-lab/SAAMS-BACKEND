@@ -9,7 +9,8 @@ import {
     updateQRCode,
     getSessionStats,
     refreshQrCode,
-    getMySessionHistory
+    getMySessionHistory,
+    getAllActiveSessions
 } from '../controllers/sessionController.js'
 
 const router = express.Router()
@@ -20,6 +21,7 @@ router.use(verifyToken)
 // ─── Static/keyword routes FIRST (before :sessionId param routes) ──────────────
 router.post('/start', authorize(['teacher', 'hod', 'superAdmin']), startSession)
 router.get('/my-sessions', authorize(['teacher', 'hod']), getMySessionHistory)
+router.get('/all-active', authorize(['student', 'teacher', 'hod', 'superAdmin']), getAllActiveSessions)
 router.get('/active/:classId', authorize(['teacher', 'hod', 'student', 'superAdmin']), getActiveSession)
 router.get('/class/:classId', authorize(['teacher', 'hod', 'superAdmin']), getClassSessions)
 

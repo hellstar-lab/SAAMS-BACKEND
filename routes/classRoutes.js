@@ -9,7 +9,8 @@ import {
     archiveClass,
     getClassStudents,
     getStudentClasses,
-    importStudents
+    importStudents,
+    getStudentDashboard
 } from '../controllers/classController.js'
 
 const router = express.Router()
@@ -21,6 +22,7 @@ router.use(verifyToken)
 router.post('/', createClass)
 router.post('/import-students', importStudents)    // BEFORE /:classId
 router.get('/my-classes', getStudentClasses)       // BEFORE /:classId
+router.get('/student-dashboard', getStudentDashboard) // BEFORE /:classId
 router.get('/', getMyClasses)
 
 // ─── Parameterized routes ──────────────────────────────────────────────────────

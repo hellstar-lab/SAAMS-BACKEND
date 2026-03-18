@@ -352,45 +352,55 @@ export const addStudentsToClass = async (req, res, next) => {
             return errorResponse(res, 'Cannot add students to an archived class', 400, 'CLASS_ARCHIVED')
         }
 
-        // 5. Fetch all student documents in parallel
-        const studentDocs = await Promise.all(
-            studentIds.map(uid => db.collection('students').doc(uid).get())
+        // 5. De-duplicate and sanitise the incoming list
+        const uniqueIds = [...new Set(studentIds.map(id => String(id).trim()).filter(Boolean))]
+
+        // 6. Validate each UID in parallel against both 'students' and 'users' collections
+        const validationResults = await Promise.all(
+            uniqueIds.map(async (uid) => {
+                const [studentDoc, userDoc] = await Promise.all([
+                    db.collection('students').doc(uid).get(),
+                    db.collection('users').doc(uid).get()
+                ])
+                const exists = studentDoc.exists || userDoc.exists
+                const activeDoc = studentDoc.exists ? studentDoc : userDoc
+                const data = activeDoc.exists ? activeDoc.data() : null
+                const role = data?.role ?? null
+                const isActive = data?.isActive !== false
+                const name = data?.name ?? null
+                return { uid, exists, role, name, isActive }
+            })
         )
 
-        // 6. Validate each student
-        const validStudents = []
-        const skipped = []
+        // 7. Bucket each UID by outcome
+        const notFound = []        // UID not in DB at all
+        const invalidRole = []     // UID exists but is not a 'student'
+        const deactivated = []     // UID is a student but account is deactivated
+        const alreadyEnrolled = [] // UID is already in this class
+        const toEnroll = []        // Valid, new students to add
 
-        for (let i = 0; i < studentIds.length; i++) {
-            const uid = studentIds[i]
-            const doc = studentDocs[i]
+        const existingStudents = new Set(classData.students || [])
 
-            if (!doc.exists) {
-                skipped.push({ studentId: uid, reason: 'Student not found' })
-                continue
+        for (const r of validationResults) {
+            if (!r.exists) {
+                notFound.push(r.uid)
+            } else if (r.role !== 'student') {
+                invalidRole.push(r.uid)
+            } else if (!r.isActive) {
+                deactivated.push(r.uid)
+            } else if (existingStudents.has(r.uid)) {
+                alreadyEnrolled.push(r.uid)
+            } else {
+                toEnroll.push(r)
             }
-
-            const data = doc.data()
-
-            if (data.isActive === false) {
-                skipped.push({ studentId: uid, reason: 'Student account is deactivated' })
-                continue
-            }
-
-            if (classData.students?.includes(uid)) {
-                skipped.push({ studentId: uid, reason: 'Already in class' })
-                continue
-            }
-
-            validStudents.push({ uid, studentId: data.studentId, name: data.name })
         }
 
-        // 7. Use Firestore batch for all writes
-        if (validStudents.length > 0) {
+        // 8. Enroll valid, not-yet-enrolled students via Firestore batch
+        if (toEnroll.length > 0) {
             const batch = db.batch()
             const classRef = db.collection('classes').doc(classId)
 
-            for (const student of validStudents) {
+            for (const student of toEnroll) {
                 batch.update(classRef, {
                     students: FieldValue.arrayUnion(student.uid),
                     updatedAt: FieldValue.serverTimestamp()
@@ -410,13 +420,15 @@ export const addStudentsToClass = async (req, res, next) => {
                     status: 'active',
                     teacherId: classData.teacherId,
                     subjectName: classData.subjectName,
-                })
+                }, { merge: true })
             }
 
             await batch.commit()
         }
 
-        // 8. Audit log (fire and forget)
+        const enrolledUids = toEnroll.map(s => s.uid)
+
+        // 9. Audit log (fire and forget)
         logAction(
             db,
             ACTIONS.STUDENT_ADDED,
@@ -425,23 +437,28 @@ export const addStudentsToClass = async (req, res, next) => {
             classId,
             TARGET_TYPES.CLASS,
             createDetails({
-                addedCount: validStudents.length,
-                skippedCount: skipped.length,
-                studentIds: validStudents.map(s => s.studentId)
+                enrolledCount: enrolledUids.length,
+                alreadyEnrolledCount: alreadyEnrolled.length,
+                notFoundCount: notFound.length,
+                invalidRoleCount: invalidRole.length,
+                enrolledUids
             }),
             classData.departmentId,
             req.ip
         )
 
-        // 9. Return
-        return successResponse(res, {
+        // 10. Return structured response matching frontend expectations
+        return res.status(200).json({
+            success: true,
+            message: `${enrolledUids.length} student(s) enrolled successfully.`,
             data: {
-                added: validStudents.length,
-                skipped: skipped.length,
-                skippedDetails: skipped,
-                totalStudents: (classData.students || []).length + validStudents.length
-            },
-            message: `${validStudents.length} student(s) added to class`
+                enrolled: enrolledUids,
+                alreadyEnrolled,
+                notFound,
+                invalidRole,
+                deactivated,
+                totalStudents: (classData.students || []).length + enrolledUids.length
+            }
         })
 
     } catch (error) {
@@ -449,6 +466,7 @@ export const addStudentsToClass = async (req, res, next) => {
         next(error)
     }
 }
+
 
 // ━━━ REMOVE STUDENT FROM CLASS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // DELETE /api/classes/:classId/students/:studentId
@@ -898,5 +916,108 @@ export const getStudentClasses = async (req, res, next) => {
         console.error('getStudentClasses error:', error)
         if (next) return next(error)
         return res.status(500).json({ success: false, error: 'Database fetch failed' })
+    }
+}
+
+// ━━━ GET STUDENT DASHBOARD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GET /api/classes/student-dashboard
+// Returns enrolled classes + their active session status + attendance summary in one payload
+export const getStudentDashboard = async (req, res, next) => {
+    try {
+        const uid = req.user.uid
+
+        // 1. Fetch enrollments
+        const enrollmentQuery = await db.collection('enrollments')
+            .where('studentId', '==', uid)
+            .get()
+
+        if (enrollmentQuery.empty) {
+            return res.status(200).json({
+                success: true,
+                data: {
+                    overallPercentage: 0,
+                    totalPresent: 0,
+                    totalClassesAttended: 0,
+                    classes: []
+                },
+                message: 'You are not enrolled in any classes'
+            })
+        }
+
+        const enrolledClassIds = enrollmentQuery.docs.map(doc => doc.data().classId)
+        
+        // 2. Fetch classes, active sessions, and attendance summaries in parallel
+        const classesData = []
+        let totalPresentAll = 0
+        let totalSessionsAll = 0
+
+        await Promise.all(enrolledClassIds.map(async (classId) => {
+            if (!classId) return
+            const classDoc = await db.collection('classes').doc(classId).get()
+            
+            if (classDoc.exists && classDoc.data().isActive === true) {
+                const cls = { id: classId, ...classDoc.data() }
+
+                // Check active session
+                const activeSession = await db.collection('sessions')
+                    .where('classId', '==', classId)
+                    .where('status', '==', 'active')
+                    .limit(1)
+                    .get()
+
+                // Check attendance summary for this student in this class
+                const summaryDoc = await db.collection('attendanceSummary').doc(`${uid}_${classId}`).get()
+                let summary = {
+                    present: 0,
+                    late: 0,
+                    absent: 0,
+                    totalSessions: 0,
+                    percentage: 0,
+                    isBelowThreshold: false
+                }
+                
+                if (summaryDoc.exists) {
+                    summary = summaryDoc.data()
+                    totalPresentAll += (summary.present || 0) + (summary.late || 0)
+                    totalSessionsAll += summary.totalSessions || 0
+                }
+
+                classesData.push({
+                    classId: cls.id,
+                    subjectName: cls.subjectName,
+                    subjectCode: cls.subjectCode,
+                    semester: cls.semester,
+                    section: cls.section,
+                    teacherName: cls.teacherName,
+                    minAttendance: cls.minAttendance || 75,
+                    hasActiveSession: !activeSession.empty,
+                    activeSessionId: activeSession.empty ? null : activeSession.docs[0].id,
+                    attendanceSummary: summary
+                })
+            }
+        }))
+
+        // Sort alphabetically by subject code
+        classesData.sort((a, b) => (a.subjectCode || '').localeCompare(b.subjectCode || ''))
+
+        // 3. Calculate overall stats
+        const overallPercentage = totalSessionsAll > 0 
+            ? Math.round((totalPresentAll / totalSessionsAll) * 100) 
+            : 0
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                overallPercentage,
+                totalPresent: totalPresentAll,
+                totalClassesAttended: totalSessionsAll,
+                classes: classesData
+            }
+        })
+
+    } catch (error) {
+        console.error('getStudentDashboard error:', error)
+        if (next) return next(error)
+        return res.status(500).json({ success: false, error: 'Failed to fetch dashboard' })
     }
 }
