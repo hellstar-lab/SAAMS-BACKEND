@@ -21,8 +21,10 @@ export function concurrencyMiddleware(req, res, next) {
     if (activeRequests < MAX_CONCURRENT) {
         // WHY: Slot available — increment and proceed immediately
         activeRequests++
-        res.on('finish', releaseSlot)
-        res.on('close', releaseSlot)
+        let slotReleased = false  // WHY: Guard against double-release if both finish and close fire
+        const release = () => { if (!slotReleased) { slotReleased = true; releaseSlot() } }
+        res.on('finish', release)
+        res.on('close', release)
         return next()
     }
 
@@ -32,8 +34,10 @@ export function concurrencyMiddleware(req, res, next) {
         if (resolved) return
         resolved = true
         // WHY: We already occupied the slot when we dequeued, so just continue
-        res.on('finish', releaseSlot)
-        res.on('close', releaseSlot)
+        let slotReleased = false
+        const release = () => { if (!slotReleased) { slotReleased = true; releaseSlot() } }
+        res.on('finish', release)
+        res.on('close', release)
         next()
     }
 
