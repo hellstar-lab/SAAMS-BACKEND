@@ -155,6 +155,9 @@ export const getStudentDisputes = async (req, res, next) => {
             return errorRes(res, 'Only students can view their disputes', 403, 'STUDENT_ONLY');
         }
 
+        // FIX: added .where('studentId') + .orderBy('createdAt') requires a composite index.
+        // The index is declared in firestore.indexes.json (studentId ASC, createdAt DESC).
+        // If the index is still building, the FAILED_PRECONDITION guard below surfaces it clearly.
         const snap = await db.collection('disputes')
             .where('studentId', '==', req.user.uid)
             .orderBy('createdAt', 'desc')
@@ -166,6 +169,16 @@ export const getStudentDisputes = async (req, res, next) => {
         return successRes(res, { data: disputes, count: disputes.length });
     } catch (error) {
         console.error('getStudentDisputes error:', error);
+        // FIX: Firestore missing composite index surfaces as FAILED_PRECONDITION (gRPC code 9).
+        // Return a specific code so the client/ops team can diagnose immediately.
+        if (error.code === 9 || (error.message && error.message.includes('requires an index'))) {
+            console.error('[my-disputes] Missing Firestore index — see:', error.message);
+            return res.status(503).json({
+                success: false,
+                error: 'Service temporarily unavailable — index building',
+                code: 'INDEX_BUILDING'
+            });
+        }
         next(error);
     }
 };
@@ -195,6 +208,14 @@ export const getTeacherDisputes = async (req, res, next) => {
         });
     } catch (error) {
         console.error('getTeacherDisputes error:', error);
+        if (error.code === 9 || (error.message && error.message.includes('requires an index'))) {
+            console.error('[teacher-disputes] Missing Firestore index — see:', error.message);
+            return res.status(503).json({
+                success: false,
+                error: 'Service temporarily unavailable — index building',
+                code: 'INDEX_BUILDING'
+            });
+        }
         next(error);
     }
 };
@@ -401,6 +422,14 @@ export const getHodDisputes = async (req, res, next) => {
         });
     } catch (error) {
         console.error('getHodDisputes error:', error);
+        if (error.code === 9 || (error.message && error.message.includes('requires an index'))) {
+            console.error('[department-disputes] Missing Firestore index — see:', error.message);
+            return res.status(503).json({
+                success: false,
+                error: 'Service temporarily unavailable — index building',
+                code: 'INDEX_BUILDING'
+            });
+        }
         next(error);
     }
 };
