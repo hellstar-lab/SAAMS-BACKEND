@@ -465,7 +465,8 @@ export const getProfile = async (req, res, next) => {
                 semester: userProfile.semester,
                 section: userProfile.section,
                 employeeId: userProfile.employeeId,
-                designation: userProfile.designation
+                designation: userProfile.designation,
+                phone: userProfile.phone || null
             }
         })
     } catch (error) {
