@@ -12,6 +12,18 @@ import { getFraudFlagsForSession } from '../utils/fraudDetector.js'
 
 const FieldValue = admin.firestore.FieldValue
 
+// ── Active Session Cache ────────────────────────────────────
+// 100 students poll GET /sessions/active/:classId every 30s.
+// All read the same document. Cache serves 99% from memory.
+// TTL 15s: short enough that session start/end propagates fast.
+// ─────────────────────────────────────────────────────────────
+const _sessionCache = new Map() // classId → { data, expiresAt }
+const SESSION_TTL = 15 * 1000 // 15 seconds
+
+const _invalidateSession = (classId) => {
+    if (classId) _sessionCache.delete(classId)
+}
+
 const VALID_METHODS = ['qrcode', 'bluetooth', 'network', 'gps']
 
 // ─── Helper: fetch session & verify ownership ──────────────────────────────────
@@ -189,6 +201,7 @@ export const startSession = async (req, res, next) => {
         }
 
         await sessionRef.set(sessionDoc2)
+        _invalidateSession(classId) // CACHE: new session started
 
         // 9. Update class: increment totalSessions & lastSessionDate
         await db.collection('classes').doc(classId).update({
@@ -411,6 +424,7 @@ export const endSession = async (req, res, next) => {
 
         // 16. Commit the batch
         await batch.commit()
+        _invalidateSession(sessionData.classId) // CACHE: session ended
 
         // 17. Update summaries for all newly absent students — fire and forget (NO await)
         absentStudents.forEach(student => {
@@ -536,6 +550,7 @@ export const refreshQrCode = async (req, res, next) => {
             qrCode: newQrCode,
             qrLastRefreshed: FieldValue.serverTimestamp()
         })
+        _invalidateSession(sessionData.classId) // CACHE: QR updated
 
         // 7. Return response
         return res.status(200).json({
@@ -570,6 +585,16 @@ export const getActiveSession = async (req, res, next) => {
         const { classId } = req.params;
         const userId = req.user.uid;
         const userRole = req.user.role; // e.g., 'student', 'teacher', 'hod', 'superAdmin'
+
+        // STEP 0: Cache check — skip all Firestore reads on cache hit
+        // Note: only cache for students (100 students polling same doc).
+        // Teachers/HODs bypass cache so they always see the latest QR code.
+        if (userRole === 'student') {
+            const cached = _sessionCache.get(classId)
+            if (cached && cached.expiresAt > Date.now()) {
+                return res.status(cached.data.success ? 200 : cached.data.status || 200).json(cached.data)
+            }
+        }
 
         // STEP 1: Verify Class Existence
         const classRef = db.collection('classes').doc(classId);
@@ -695,11 +720,14 @@ export const getActiveSession = async (req, res, next) => {
             academicYear: session.academicYear
         };
 
-        return res.status(200).json({
+        const responsePayload = {
             success: true,
             data: activeSessionResponse,
             message: "Active session retrieved successfully"
-        });
+        }
+        // Cache for student polling — teachers/HODs bypass (see STEP 0)
+        _sessionCache.set(classId, { data: responsePayload, expiresAt: Date.now() + SESSION_TTL })
+        return res.status(200).json(responsePayload);
 
     } catch (error) {
         console.error('getActiveSession error:', error);

@@ -6,6 +6,7 @@ import rateLimit from 'express-rate-limit'
 import timeout from 'connect-timeout'
 import dotenv from 'dotenv'
 import { randomUUID } from 'crypto'
+import compression from 'compression'
 
 dotenv.config()
 
@@ -23,8 +24,11 @@ import superAdminRoutes from './routes/superAdminRoutes.js'
 import { errorMiddleware } from './middleware/errorMiddleware.js'
 import { concurrencyMiddleware, getConcurrencyStats } from './middleware/concurrencyMiddleware.js'
 import { getCacheStats } from './middleware/cacheMiddleware.js'
+import { tokenCache, userCache } from './middleware/authMiddleware.js'
 
 const app = express()
+app.set('trust proxy', 1); // Required for Render/Heroku/Railway reverse proxy
+app.use(compression({ level: 6, threshold: 1024 }))
 const PORT = process.env.PORT || 3000
 
 // ─── REQUEST ID ──────────────────────────────────────────────────────────────
@@ -97,9 +101,10 @@ app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }))
 
 // ─── HEALTH ENDPOINT ─────────────────────────────────────────────────────────
 // WHY: Render pings this endpoint to detect crashes — includes memory, uptime,
-// and concurrency diagnostics for operational visibility
+// concurrency, and cache diagnostics for operational visibility
 app.get('/health', (req, res) => {
-  const memMb = process.memoryUsage().rss / 1024 / 1024
+  const mem = process.memoryUsage()
+  const memMb = mem.rss / 1024 / 1024
   const concurrency = getConcurrencyStats()
   const cacheStats = getCacheStats()
 
@@ -113,10 +118,18 @@ app.get('/health', (req, res) => {
     status: 'ok',
     app: 'SAAM Backend',
     version: '1.0.0',
-    uptime: Math.floor(process.uptime()),
-    memory_mb: Math.round(memMb),
+    uptime: `${Math.floor(process.uptime() / 60)}m ${Math.floor(process.uptime() % 60)}s`,
+    memory: {
+      heapUsed: `${Math.round(mem.heapUsed / 1024 / 1024)}MB`,
+      rss: `${Math.round(memMb)}MB`
+    },
     concurrency,
-    cache: cacheStats,
+    cache: {
+      ...cacheStats,
+      authTokens: tokenCache?.size ?? 0,
+      authUsers: userCache?.size ?? 0
+    },
+    env: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString()
   })
 })
@@ -150,6 +163,22 @@ app.use((req, res) => {
 app.use(errorMiddleware)
 
 
+
+// ─── KEEPALIVE SELF-PING ──────────────────────────────────────────────────────
+// WHY: Render Free Tier sleeps after 15 min of inactivity.
+// Self-ping every 10 min keeps the process warm.
+// Opt-in via KEEPALIVE_ENABLED=true env var (disabled by default).
+if (process.env.KEEPALIVE_ENABLED === 'true') {
+  const PING_URL = `${process.env.RENDER_EXTERNAL_URL || 'http://localhost:' + (process.env.PORT || 3000)}/health`
+  const pingLib = PING_URL.startsWith('https') ? (await import('https')).default : (await import('http')).default
+  const keepAliveInterval = setInterval(() => {
+    pingLib.get(PING_URL, () => {}).on('error', (e) => {
+      console.error('[Keepalive] ping failed:', e.message)
+    })
+  }, 10 * 60 * 1000) // every 10 min — Render sleeps after 15 min
+  process.on('SIGTERM', () => clearInterval(keepAliveInterval))
+  console.log('[Keepalive] Enabled —', PING_URL)
+}
 
 // ─── SERVER WITH KEEP-ALIVE ──────────────────────────────────────────────────
 // WHY: keepAliveTimeout = 65s is slightly above Render's 60s load balancer timeout

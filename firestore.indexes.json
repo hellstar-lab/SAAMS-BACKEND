@@ -498,6 +498,51 @@
                     "order": "ASCENDING"
                 }
             ]
+        },
+        {
+            "__comment": "FIX: getStudentDisputes — where(studentId) + orderBy(createdAt) with no status filter",
+            "collectionGroup": "disputes",
+            "queryScope": "COLLECTION",
+            "fields": [
+                {
+                    "fieldPath": "studentId",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "createdAt",
+                    "order": "DESCENDING"
+                }
+            ]
+        },
+        {
+            "__comment": "FIX: getTeacherDisputes — where(teacherId) + orderBy(createdAt) with no status filter",
+            "collectionGroup": "disputes",
+            "queryScope": "COLLECTION",
+            "fields": [
+                {
+                    "fieldPath": "teacherId",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "createdAt",
+                    "order": "DESCENDING"
+                }
+            ]
+        },
+        {
+            "__comment": "FIX: getHodDisputes — where(departmentId) + orderBy(createdAt) with no status filter",
+            "collectionGroup": "disputes",
+            "queryScope": "COLLECTION",
+            "fields": [
+                {
+                    "fieldPath": "departmentId",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "createdAt",
+                    "order": "DESCENDING"
+                }
+            ]
         }
     ],
     "fieldOverrides": []

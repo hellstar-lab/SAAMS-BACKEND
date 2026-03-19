@@ -251,7 +251,20 @@ export const markAttendance = async (req, res, next) => {
             });
         }
 
-        // STEP 3: Atomic transaction (fetch → enroll check → duplicate check → validate → write)
+        // STEP 3: Pre-transaction duplicate check (avoids transaction overhead for retries)
+        // Deterministic ID prevents duplicate writes at the database level.
+        const attendanceDocId = `${sessionId}_${studentId}`;
+        const existingPreCheck = await db.collection('attendance').doc(attendanceDocId).get();
+        if (existingPreCheck.exists) {
+            return res.status(409).json({
+                success: false,
+                code: 'ALREADY_MARKED',
+                message: 'Attendance already marked for this session.',
+                data: existingPreCheck.data()
+            });
+        }
+
+        // STEP 4: Atomic transaction (fetch → enroll check → duplicate check → validate → write)
         let attendanceResult = null;
 
         await db.runTransaction(async (transaction) => {

@@ -279,8 +279,16 @@ export const getClassById = async (req, res, next) => {
         const uid = req.user.uid
         const role = req.user.role
 
-        // 1. Fetch class document
-        const classDoc = await db.collection('classes').doc(classId).get()
+        // 1 + 3. PARALLELIZED: class doc and active session are independent reads
+        const [classDoc, activeSession] = await Promise.all([
+            db.collection('classes').doc(classId).get(),
+            db.collection('sessions')
+                .where('classId', '==', classId)
+                .where('status', '==', 'active')
+                .limit(1)
+                .get()
+        ])
+
         if (!classDoc.exists) {
             return errorResponse(res, 'Class not found', 404, 'CLASS_NOT_FOUND')
         }
@@ -302,13 +310,6 @@ export const getClassById = async (req, res, next) => {
             }
         }
         // superAdmin: allow always — no check needed
-
-        // 3. Fetch active session status
-        const activeSession = await db.collection('sessions')
-            .where('classId', '==', classId)
-            .where('status', '==', 'active')
-            .limit(1)
-            .get()
 
         return successResponse(res, {
             data: {
@@ -1077,26 +1078,28 @@ export const getStudentClasses = async (req, res, next) => {
         // It's safer to use Promise.all to fetch them individually mapped.
         await Promise.all(enrolledClassIds.map(async (classId) => {
             if (!classId) return
-            const classDoc = await db.collection('classes').doc(classId).get()
-            
-            if (classDoc.exists) {
-                const cls = { id: classId, ...classDoc.data() }
 
-                const activeSession = await db.collection('sessions')
+            // PARALLELIZED: class doc, active session, latest attendance are independent reads
+            const [classDoc, activeSession, latestAttendanceQuery] = await Promise.all([
+                db.collection('classes').doc(classId).get(),
+                db.collection('sessions')
                     .where('classId', '==', classId)
                     .where('status', '==', 'active')
                     .limit(1)
-                    .get()
-
+                    .get(),
                 // FIX (Bug 2): Removed .orderBy('createdAt', 'desc') — that compound query
                 // (where + where + orderBy on a different field) requires a composite Firestore
                 // index that was absent, causing FAILED_PRECONDITION → 503 DB_UNAVAILABLE.
                 // We only need the latest attendanceId; ordering is not critical here.
-                const latestAttendanceQuery = await db.collection('attendance')
+                db.collection('attendance')
                     .where('classId', '==', classId)
                     .where('studentId', '==', uid)
                     .limit(1)
                     .get()
+            ])
+
+            if (classDoc.exists) {
+                const cls = { id: classId, ...classDoc.data() }
                 
                 let latestAttendanceId = null;
                 if (!latestAttendanceQuery.empty) {
@@ -1180,27 +1183,28 @@ export const getStudentDashboard = async (req, res, next) => {
 
         await Promise.all(enrolledClassIds.map(async (classId) => {
             if (!classId) return
-            const classDoc = await db.collection('classes').doc(classId).get()
-            
-            if (classDoc.exists) {
-                const cls = { id: classId, ...classDoc.data() }
 
-                // Check active session
-                const activeSession = await db.collection('sessions')
+            // PARALLELIZED: class doc, active session, attendance snap are independent reads
+            const [classDoc, activeSession, attendanceSnap] = await Promise.all([
+                db.collection('classes').doc(classId).get(),
+                db.collection('sessions')
                     .where('classId', '==', classId)
                     .where('status', '==', 'active')
                     .limit(1)
-                    .get()
-
+                    .get(),
                 // FIX (Bug 1): Previously read from `attendanceSummary` collection, which
                 // returns totalSessions=0 when the summary document hasn't been written yet.
                 // Now we live-query the `attendance` collection directly (the source of truth):
                 //   totalSessions = count of ALL attendance records for this student+class
                 //   attended      = count where status === 'present'
-                const attendanceSnap = await db.collection('attendance')
+                db.collection('attendance')
                     .where('studentId', '==', uid)
                     .where('classId', '==', classId)
                     .get()
+            ])
+
+            if (classDoc.exists) {
+                const cls = { id: classId, ...classDoc.data() }
 
                 const totalSessions = attendanceSnap.size
                 const attended = attendanceSnap.docs.filter(d => d.data().status === 'present').length

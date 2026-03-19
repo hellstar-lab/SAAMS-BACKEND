@@ -7,17 +7,14 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "postinstall": "node polyfill-tfjs.js"
+    "clean:students-teachers": "node clean-students-teachers.js",
+    "clean:classes-sessions": "node clean-classes-sessions.js",
+    "clean:attendance": "node clean-attendance.js",
+    "clean:all": "node clear-db.js"
   },
   "dependencies": {
-    "@tensorflow/tfjs": "^4.22.0",
-    "@tensorflow/tfjs-backend-cpu": "^4.22.0",
-    "@tensorflow/tfjs-backend-wasm": "^4.22.0",
-    "@tensorflow/tfjs-converter": "^4.22.0",
-    "@tensorflow/tfjs-core": "^4.22.0",
-    "@vladmandic/face-api": "^1.7.15",
     "body-parser": "^1.20.2",
-    "canvas": "^3.2.1",
+    "compression": "^1.8.1",
     "connect-timeout": "^1.9.1",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
